@@ -5,7 +5,7 @@ const { MercadoPagoConfig, Preference } = require('mercadopago');
 const app = express();
 app.use(express.json());
 
-// Permitir conexiones libres desde masifantasia.com y celulares
+// Permitir conexiones libres desde masayfantasia.com y celulares
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST'],
@@ -25,9 +25,9 @@ app.post('/api/crear-preferencia', async (req, res) => {
                 payer: payer,
                 metadata: metadata,
                 back_urls: {
-                    success: "https://masifantasia.com",
-                    failure: "https://masifantasia.com",
-                    pending: "https://masifantasia.com"
+                    success: "https://masayfantasia.com",
+                    failure: "https://masayfantasia.com",
+                    pending: "https://masayfantasia.com"
                 },
                 auto_return: "approved",
             }
