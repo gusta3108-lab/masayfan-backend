@@ -4,7 +4,13 @@ const { MercadoPagoConfig, Preference } = require('mercadopago');
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+
+// Permitir conexiones libres desde masifantasia.com y celulares
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
 
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
