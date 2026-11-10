@@ -61,7 +61,13 @@ async function priceCartItems(items) {
   const optionsByName = new Map();
   optionsSnapshot.forEach(doc => {
     const data = doc.data();
-    optionsByName.set(String(data.name || data.nombre || '').trim().toLowerCase(), data);
+    if (data.activo === false) return;
+    const key = String(data.name || data.nombre || '').trim().toLowerCase();
+    if (!key) return;
+    // El carrito actual identifica opcionales por nombre. Si hay nombres repetidos,
+    // no se puede determinar el precio correcto de forma inequívoca: se rechaza.
+    if (optionsByName.has(key)) throw new Error('Hay opcionales con nombres repetidos. Contactá al administrador para corregir el catálogo.');
+    optionsByName.set(key, data);
   });
 
   const pricedItems = [];
@@ -78,9 +84,14 @@ async function priceCartItems(items) {
       const bannerSnap = await firestore.collection('banners').doc(String(item.bannerId)).get();
       if (!bannerSnap.exists) throw new Error('La promoción ya no está disponible.');
       const banner = bannerSnap.data();
+      if (!banner.productId) throw new Error('La promoción no tiene un producto asociado.');
+      const promoProductSnap = await firestore.collection('productos').doc(String(banner.productId)).get();
+      if (!promoProductSnap.exists || promoProductSnap.data().activo === false) {
+        throw new Error('El producto de esta promoción ya no está disponible.');
+      }
       unitPrice = money(banner.promoPrice);
-      name = String(banner.title || '').slice(0, 160);
-      if (!(unitPrice > 0)) throw new Error('Precio de promoción inválido.');
+      name = String(banner.title || promoProductSnap.data().name || promoProductSnap.data().nombre || '').slice(0, 160);
+      if (!(unitPrice > 0) || !name) throw new Error('Precio o nombre de promoción inválido.');
       itemId = 'promo_' + bannerSnap.id;
     } else {
       if (!itemId || itemId.startsWith('banner_')) throw new Error('No se pudo identificar un producto del carrito.');
@@ -89,7 +100,11 @@ async function priceCartItems(items) {
       const product = productSnap.data();
       if (product.activo === false) throw new Error('Uno de los productos no está disponible.');
       const basePrice = money(product.price ?? product.precio ?? 0);
-      const discount = Math.max(0, Math.min(100, Number(product.discount || 0)));
+      const discount = Number(product.discount || 0);
+      if (!Number.isFinite(discount) || discount < 0 || discount > 100) {
+        throw new Error('El descuento de un producto no es válido.');
+      }
+      if (!(basePrice > 0)) throw new Error('Precio de producto inválido.');
       unitPrice = discount > 0 ? Math.round(basePrice - (basePrice * discount / 100)) : basePrice;
       name = String(product.name || product.nombre || '').slice(0, 160);
       const selectedOptions = String(item.options || '').split(',').map(v => v.trim()).filter(Boolean);
@@ -164,8 +179,11 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
   if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
     return { verified: false, reason: 'El importe o la moneda del pago no coincide con el pedido.' };
   }
-  if (pending.preferenceId && payment.preference_id && String(payment.preference_id) !== String(pending.preferenceId)) {
+  if (!pending.preferenceId || !payment.preference_id || String(payment.preference_id) !== String(pending.preferenceId)) {
     return { verified: false, reason: 'La preferencia del pago no coincide con el pedido.' };
+  }
+  if (payment.metadata?.user_uid && String(payment.metadata.user_uid) !== String(pending.uid)) {
+    return { verified: false, reason: 'La cuenta asociada al pago no coincide con el pedido.' };
   }
 
   await firestore.runTransaction(async transaction => {
@@ -268,7 +286,9 @@ app.post('/api/verificar-pago', async (req, res) => {
     if (!requireServices(res)) return;
     const user = await authenticatedUser(req);
     const { payment_id: paymentId, external_reference: reference } = req.body || {};
-    if (!paymentId || !reference) return res.status(400).json({ verified: false, error: 'Faltan datos para verificar el pago.' });
+    if (!paymentId || !/^\d{1,30}$/.test(String(paymentId)) || !reference || !/^[0-9a-f-]{36}$/i.test(String(reference))) {
+      return res.status(400).json({ verified: false, error: 'Faltan datos válidos para verificar el pago.' });
+    }
     const result = await registerApprovedPayment(paymentId, reference, user.uid);
     res.json(result);
   } catch (error) {
@@ -284,7 +304,8 @@ app.post('/api/webhook', async (req, res) => {
     if (!validWebhookSignature(req)) return res.sendStatus(401);
     const type = req.query.type || req.body?.type;
     const paymentId = req.query['data.id'] || req.body?.data?.id;
-    if (type !== 'payment' || !paymentId) return res.sendStatus(200);
+    if (type !== 'payment') return res.sendStatus(200);
+    if (!paymentId || !/^\d{1,30}$/.test(String(paymentId))) return res.sendStatus(400);
 
     // El webhook solo es una señal: el estado real se consulta directamente en Mercado Pago.
     const paymentClient = new Payment(mpClient);
