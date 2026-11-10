@@ -274,7 +274,7 @@ app.post('/api/admin/test-order', async (req, res) => {
     });
     return res.status(201).json({ success: true, order_id: orderRef.id, esPrueba: true });
   } catch (error) {
-    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
     const adminError = error.message === 'ADMIN_REQUIRED';
     console.error('Error creando pedido de prueba:', error.message);
     return res.status(authError ? 401 : adminError ? 403 : 500).json({
