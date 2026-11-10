@@ -1,8 +1,13 @@
 const express = require('express');
 const cors = require('cors');
-const crypto = require('node:crypto');
 const admin = require('firebase-admin');
-const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
+const {
+  MercadoPagoConfig,
+  Preference,
+  Payment,
+  WebhookSignatureValidator,
+  InvalidWebhookSignatureError
+} = require('mercadopago');
 
 const app = express();
 app.use(cors({
@@ -132,23 +137,24 @@ async function priceCartItems(items) {
 }
 
 function validWebhookSignature(req) {
-  const signatureHeader = req.get('x-signature') || '';
-  const requestId = req.get('x-request-id') || '';
-  const dataId = req.query['data.id'] || req.query.id || req.body?.data?.id;
   const secret = process.env.MP_WEBHOOK_SECRET;
-  if (!secret || !signatureHeader || !requestId || !dataId) return false;
-
-  const parts = Object.fromEntries(signatureHeader.split(',').map(part => part.trim().split('=')));
-  const ts = parts.ts;
-  const received = parts.v1;
-  if (!ts || !received || !/^\d+$/.test(ts)) return false;
-  if (Math.abs(Date.now() - Number(ts)) > 5 * 60 * 1000) return false;
-
-  const manifest = `id:${String(dataId).toLowerCase()};request-id:${requestId};ts:${ts};`;
-  const expected = crypto.createHmac('sha256', secret).update(manifest).digest('hex');
-  const a = Buffer.from(expected, 'hex');
-  const b = Buffer.from(received, 'hex');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (!secret) return false;
+  try {
+    // Validador oficial: respeta la firma original y la tolerancia temporal.
+    WebhookSignatureValidator.validate({
+      xSignature: req.get('x-signature'),
+      xRequestId: req.get('x-request-id'),
+      dataId: req.query['data.id'],
+      secret,
+      toleranceSeconds: 300
+    });
+    return true;
+  } catch (error) {
+    if (!(error instanceof InvalidWebhookSignatureError)) {
+      console.error('Error interno validando firma del webhook:', error.message);
+    }
+    return false;
+  }
 }
 
 async function registerApprovedPayment(paymentId, expectedReference, userUid) {
@@ -303,7 +309,7 @@ app.post('/api/webhook', async (req, res) => {
     if (!requireServices(res)) return;
     if (!validWebhookSignature(req)) return res.sendStatus(401);
     const type = req.query.type || req.body?.type;
-    const paymentId = req.query['data.id'] || req.body?.data?.id;
+    const paymentId = req.query['data.id'];
     if (type !== 'payment') return res.sendStatus(200);
     if (!paymentId || !/^\d{1,30}$/.test(String(paymentId))) return res.sendStatus(400);
 
