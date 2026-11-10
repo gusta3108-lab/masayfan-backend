@@ -267,7 +267,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
           failure: 'https://masayfantasias.com/?mp_return=1',
           pending: 'https://masayfantasias.com/?mp_return=1'
         },
-        notification_url: 'https://masayfan-backend.onrender.com/api/webhook',
+        notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
         auto_return: 'approved'
       }
     });
