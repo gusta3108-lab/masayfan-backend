@@ -12,7 +12,7 @@ const {
 
 const app = express();
 app.use(cors({
-  origin: ['https://masayfantasias.com', 'https://www.masayfantasias.com'],
+  origin: ['https://masayfantasias.com', 'https://www.masayfantasias.com', 'https://masivfantasias.com', 'https://www.masivfantasias.com'],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
