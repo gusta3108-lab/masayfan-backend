@@ -42,16 +42,20 @@ try {
   console.error('No se pudo inicializar Firebase Admin. Revisá FIREBASE_SERVICE_ACCOUNT_JSON.');
 }
 
-function requireServices(res) {
-  if (!mpClient) {
-    res.status(503).json({ success: false, error: 'Mercado Pago no está configurado en el servidor.' });
-    return false;
-  }
+function requireFirebaseServices(res) {
   if (!firestore || !firebaseAuth) {
     res.status(503).json({ success: false, error: 'Firebase Admin no está configurado en el servidor.' });
     return false;
   }
   return true;
+}
+
+function requireServices(res) {
+  if (!mpClient) {
+    res.status(503).json({ success: false, error: 'Mercado Pago no está configurado en el servidor.' });
+    return false;
+  }
+  return requireFirebaseServices(res);
 }
 
 async function authenticatedUser(req) {
@@ -242,7 +246,7 @@ app.get('/health', (_req, res) => {
 
 app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
-    if (!requireServices(res)) return;
+    if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
