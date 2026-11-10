@@ -62,7 +62,13 @@ async function authenticatedUser(req) {
   const header = req.headers.authorization || '';
   if (!header.startsWith('Bearer ')) throw new Error('AUTH_REQUIRED');
   // Rechaza también sesiones revocadas y usuarios deshabilitados.
-  const decoded = await firebaseAuth.verifyIdToken(header.slice(7), true);
+  // Los tokens inválidos o vencidos se normalizan para que todas las rutas respondan 401.
+  let decoded;
+  try {
+    decoded = await firebaseAuth.verifyIdToken(header.slice(7), true);
+  } catch (_error) {
+    throw new Error('AUTH_REQUIRED');
+  }
   if (!decoded.email) throw new Error('AUTH_EMAIL_REQUIRED');
   return decoded;
 }
