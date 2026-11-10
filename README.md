@@ -25,7 +25,7 @@ El backend usa Admin SDK para crear los documentos de pedidos verificados y mant
 
 Configurar notificaciones de tipo **Pagos** hacia:
 
-`https://masayfan-backend.onrender.com/api/webhook`
+`https://masayfantasias-webhook-2026.onrender.com/api/webhook`
 
 Copiar la clave de firma secreta generada por Mercado Pago a `MP_WEBHOOK_SECRET` en Render. La ruta valida `x-signature` y consulta el pago directamente a Mercado Pago antes de registrar el pedido.
 
