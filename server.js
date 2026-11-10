@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('node:crypto');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const {
@@ -178,7 +179,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
 
   if (!pendingSnap.exists) {
     const existingOrder = await orderRef.get();
-    if (existingOrder.exists && String(existingOrder.data().paymentId) === String(paymentId)) {
+    if (existingOrder.exists
+      && String(existingOrder.data().paymentId) === String(paymentId)
+      && (!userUid || existingOrder.data().userEmail === (await firebaseAuth.getUser(userUid)).email)) {
       return { verified: true, alreadyRegistered: true };
     }
     return { verified: false, reason: 'No se encontró el pedido pendiente asociado al pago.' };
@@ -228,7 +231,12 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, mercadoPagoConfigured: Boolean(mpClient), firebaseConfigured: Boolean(firestore && firebaseAuth) });
+  res.json({
+    ok: true,
+    mercadoPagoConfigured: Boolean(mpClient),
+    firebaseConfigured: Boolean(firestore && firebaseAuth),
+    webhookSecretConfigured: Boolean(process.env.MP_WEBHOOK_SECRET)
+  });
 });
 
 app.post('/api/pedidos/efectivo', async (req, res) => {
@@ -279,6 +287,10 @@ app.post('/api/crear-preferencia', async (req, res) => {
   try {
     if (!requireServices(res)) return;
     const user = await authenticatedUser(req);
+    const storeSnap = await firestore.collection('config').doc('local').get();
+    if (storeSnap.exists && storeSnap.data().abierto === false) {
+      return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
+    }
     const { items, order } = req.body || {};
     if (!order || typeof order !== 'object') return res.status(400).json({ success: false, error: 'Datos del pedido incompletos.' });
 
