@@ -218,6 +218,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
     transaction.set(orderRef, {
       ...data.order,
       userEmail: data.userEmail,
+      uid: data.uid,
       status: 'nuevo',
       paymentMethod: 'mercadopago',
       paymentId: String(paymentId),
