@@ -231,6 +231,50 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, mercadoPagoConfigured: Boolean(mpClient), firebaseConfigured: Boolean(firestore && firebaseAuth) });
 });
 
+app.post('/api/pedidos/efectivo', async (req, res) => {
+  try {
+    if (!requireServices(res)) return;
+    const user = await authenticatedUser(req);
+    const storeSnap = await firestore.collection('config').doc('local').get();
+    if (storeSnap.exists && storeSnap.data().abierto === false) {
+      return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
+    }
+    const { items, order } = req.body || {};
+    if (!order || typeof order !== 'object') {
+      return res.status(400).json({ success: false, error: 'Datos del pedido incompletos.' });
+    }
+    const clientName = String(order.clientName || '').trim().slice(0, 120);
+    const clientPhone = String(order.clientPhone || '').trim().slice(0, 40);
+    const address = String(order.address || '').trim().slice(0, 300);
+    const notes = String(order.notes || '').trim().slice(0, 1000);
+    if (!clientName || !clientPhone || !address) {
+      return res.status(400).json({ success: false, error: 'Completá nombre, teléfono y dirección.' });
+    }
+    const pricedItems = await priceCartItems(items);
+    const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
+    const orderRef = firestore.collection('pedidos').doc();
+    await orderRef.create({
+      clientName, clientPhone, address, notes,
+      items: pricedItems,
+      total,
+      uid: user.uid,
+      userEmail: user.email,
+      status: 'nuevo',
+      paymentMethod: 'efectivo',
+      paymentStatus: 'pending',
+      createdAt: new Date().toISOString()
+    });
+    return res.status(201).json({ success: true, order_id: orderRef.id });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
+    console.error('Error registrando pedido en efectivo:', error.message);
+    return res.status(authError ? 401 : 400).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.' : error.message
+    });
+  }
+});
+
 app.post('/api/crear-preferencia', async (req, res) => {
   try {
     if (!requireServices(res)) return;
