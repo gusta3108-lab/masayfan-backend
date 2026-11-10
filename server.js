@@ -67,6 +67,13 @@ async function authenticatedUser(req) {
   return decoded;
 }
 
+async function authenticatedAdmin(req) {
+  const user = await authenticatedUser(req);
+  const adminSnap = await firestore.collection('administradores').doc(user.email).get();
+  if (!adminSnap.exists) throw new Error('ADMIN_REQUIRED');
+  return user;
+}
+
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
 async function priceCartItems(items) {
@@ -242,6 +249,41 @@ app.get('/health', (_req, res) => {
     firebaseConfigured: Boolean(firestore && firebaseAuth),
     webhookSecretConfigured: Boolean(process.env.MP_WEBHOOK_SECRET)
   });
+});
+
+app.post('/api/admin/test-order', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const adminUser = await authenticatedAdmin(req);
+    const orderRef = firestore.collection('pedidos').doc();
+    const createdAt = new Date().toISOString();
+    await orderRef.create({
+      esPrueba: true,
+      testType: 'audio',
+      clientName: 'PRUEBA DE AUDIO',
+      clientPhone: '—',
+      address: 'Pedido ficticio de administración',
+      notes: 'ESTE PEDIDO ES UNA PRUEBA. No corresponde a una venta ni genera cobros.',
+      items: [{ id: 'test-audio', name: 'Prueba de notificación', price: 0, qty: 1, options: '', description: 'Pedido ficticio para comprobar recepción y audio.' }],
+      total: 0,
+      uid: adminUser.uid,
+      status: 'nuevo',
+      paymentMethod: 'prueba',
+      paymentStatus: 'not_applicable',
+      createdAt
+    });
+    return res.status(201).json({ success: true, order_id: orderRef.id, esPrueba: true });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error creando pedido de prueba:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para realizar esta prueba.'
+        : 'No se pudo crear el pedido de prueba.'
+    });
+  }
 });
 
 app.post('/api/pedidos/efectivo', async (req, res) => {
