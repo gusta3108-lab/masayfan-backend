@@ -27,7 +27,13 @@ let firebaseAuth = null;
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    if (serviceAccount.project_id !== 'masayfantasias') {
+      throw new Error('La cuenta de servicio no pertenece al proyecto Firebase esperado.');
+    }
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: serviceAccount.project_id
+    });
     firestore = admin.firestore();
     firebaseAuth = admin.auth();
   }
@@ -50,7 +56,8 @@ function requireServices(res) {
 async function authenticatedUser(req) {
   const header = req.headers.authorization || '';
   if (!header.startsWith('Bearer ')) throw new Error('AUTH_REQUIRED');
-  const decoded = await firebaseAuth.verifyIdToken(header.slice(7));
+  // Rechaza también sesiones revocadas y usuarios deshabilitados.
+  const decoded = await firebaseAuth.verifyIdToken(header.slice(7), true);
   if (!decoded.email) throw new Error('AUTH_EMAIL_REQUIRED');
   return decoded;
 }
