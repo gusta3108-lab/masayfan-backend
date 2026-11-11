@@ -407,6 +407,50 @@ app.post('/api/admin/test-order', async (req, res) => {
   }
 });
 
+app.post('/api/admin/orders/:orderId/status', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const orderId = String(req.params.orderId || '');
+    const newStatus = String(req.body?.status || '');
+    const allowed = ['nuevo', 'preparacion', 'listo', 'finalizado', 'rechazado'];
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId) || !allowed.includes(newStatus)) {
+      return res.status(400).json({ success: false, error: 'Pedido o estado inválido.' });
+    }
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      if (order.status === 'rechazado' && newStatus !== 'rechazado') {
+        throw new Error('No se puede reabrir un pedido rechazado; creá un nuevo pedido.');
+      }
+      if (newStatus === 'rechazado' && order.status !== 'rechazado'
+        && order.inventoryCommitted === true && order.inventoryRestored !== true) {
+        const requirements = stockRequirements(order.items || []);
+        const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
+        const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
+        requirements.forEach((item, index) => {
+          const snap = snapshots[index];
+          if (!snap.exists || snap.data().stockManaged !== true) return;
+          const quantity = Number(snap.data().stockQuantity || 0);
+          transaction.update(refs[index], { stockQuantity: quantity + item.qty });
+        });
+        transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString() });
+      } else {
+        transaction.update(orderRef, { status: newStatus });
+      }
+    });
+    return res.json({ success: true, order_id: orderId, status: newStatus });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para modificar pedidos.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error actualizando estado del pedido:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo actualizar el pedido.' });
+  }
+});
+
 app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
