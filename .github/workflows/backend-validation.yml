@@ -15,4 +15,6 @@ jobs:
         with:
           node-version: 20
       - name: Check JavaScript syntax
-        run: node --check server.js
+        run: node --check server.js && node --check scripts/release-expired-inventory.js
+      - name: Run tests
+        run: npm test
