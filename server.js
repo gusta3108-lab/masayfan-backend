@@ -11,9 +11,14 @@ const {
   InvalidWebhookSignatureError
 } = require('mercadopago');
 
+const { isAllowedOrigin } = require('./lib/cors-origin');
+
 const app = express();
 app.use(cors({
-  origin: ['https://masayfantasias.com', 'https://www.masayfantasias.com'],
+  origin(origin, callback) {
+    if (!origin || isAllowedOrigin(origin)) return callback(null, true);
+    return callback(new Error('Origen no autorizado por CORS'));
+  },
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key']
 }));
