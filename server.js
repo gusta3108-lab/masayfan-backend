@@ -226,9 +226,9 @@ function validWebhookSignature(req) {
   }
 }
 
-async function registerApprovedPayment(paymentId, expectedReference, userUid) {
+async function registerApprovedPayment(paymentId, expectedReference, userUid, verifiedPayment = null) {
   const paymentClient = new Payment(mpClient);
-  const payment = await paymentClient.get({ id: String(paymentId) });
+  const payment = verifiedPayment || await paymentClient.get({ id: String(paymentId) });
   const reference = String(payment.external_reference || '');
   if (!reference || reference !== String(expectedReference || '')) {
     return { verified: false, reason: 'La referencia del pago no coincide.' };
@@ -910,7 +910,7 @@ app.post('/api/webhook', async (req, res) => {
       }
       return res.sendStatus(200);
     }
-    const result = await registerApprovedPayment(paymentId, reference, null);
+    const result = await registerApprovedPayment(paymentId, reference, null, payment);
     if (!result.verified) return res.status(500).json({ received: true, processed: false });
     return res.sendStatus(200);
   } catch (error) {
