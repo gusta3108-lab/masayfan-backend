@@ -708,7 +708,8 @@ async function updateReversedPayment(paymentId, reference, status) {
     const order = orderSnap.data();
     // Solo actualizar el pedido si pertenece exactamente al pago consultado en Mercado Pago.
     if (String(order.paymentId || '') !== String(paymentId)) return false;
-    if (['refunded', 'charged_back'].includes(String(order.paymentStatus || ''))) return true;
+    if (order.paymentStatus === 'charged_back') return true;
+    if (order.paymentStatus === 'refunded' && status !== 'charged_back') return true;
     if (order.paymentStatus !== 'approved') return false;
     transaction.update(orderRef, {
       paymentStatus: status,
