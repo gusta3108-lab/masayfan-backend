@@ -470,6 +470,35 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
   }
 });
 
+app.get('/api/admin/payment-incidents', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const [paymentIncidents, checkoutIncidents] = await Promise.all([
+      firestore.collection('incidencias_pagos').orderBy('createdAt', 'desc').limit(50).get(),
+      firestore.collection('incidencias_checkout').orderBy('createdAt', 'desc').limit(50).get()
+    ]);
+    const incidents = [
+      ...paymentIncidents.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      ...checkoutIncidents.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    ].sort((a, b) => {
+      const toMillis = value => value?.toMillis ? value.toMillis() : (value ? new Date(value).getTime() : 0);
+      return toMillis(b.createdAt) - toMillis(a.createdAt);
+    }).slice(0, 50);
+    return res.json({ success: true, incidents });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error consultando incidencias de pago:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para consultar incidencias.'
+        : 'No se pudieron consultar las incidencias de pago.'
+    });
+  }
+});
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
