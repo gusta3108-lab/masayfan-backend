@@ -385,11 +385,18 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
       .limit(100)
       .get();
     let released = 0;
+    let failed = 0;
     for (const pendingDoc of expired.docs) {
       if (pendingDoc.data().inventoryReleased === true) continue;
-      if (await releasePendingInventory(pendingDoc.ref)) released += 1;
+      try {
+        if (await releasePendingInventory(pendingDoc.ref)) released += 1;
+      } catch (cleanupError) {
+        failed += 1;
+        // Un registro dañado no debe impedir liberar las demás reservas vencidas.
+        console.error('No se pudo liberar una reserva vencida:', pendingDoc.id, cleanupError.message);
+      }
     }
-    return res.json({ success: true, released, checked: expired.size });
+    return res.json({ success: failed === 0, released, failed, checked: expired.size });
   } catch (error) {
     console.error('Error liberando reservas vencidas:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudieron liberar las reservas vencidas.' });
