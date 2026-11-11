@@ -321,7 +321,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
     }
     if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
     const data = freshPending.data();
-    await completeInventorySale(transaction, data.order.items, true);
+    await completeInventorySale(transaction, data.order.items, data.inventoryReleased !== true);
     transaction.set(orderRef, {
       ...data.order,
       userEmail: data.userEmail,
@@ -563,9 +563,14 @@ app.post('/api/webhook', async (req, res) => {
     // El webhook solo es una señal: el estado real se consulta directamente en Mercado Pago.
     const paymentClient = new Payment(mpClient);
     const payment = await paymentClient.get({ id: String(paymentId) });
-    if (payment.status !== 'approved') return res.sendStatus(200);
     const reference = String(payment.external_reference || '');
     if (!reference) return res.sendStatus(200);
+    if (payment.status !== 'approved') {
+      if (['cancelled', 'rejected', 'refunded', 'charged_back'].includes(String(payment.status))) {
+        await releasePendingInventory(firestore.collection('pagos_pendientes').doc(reference));
+      }
+      return res.sendStatus(200);
+    }
     const result = await registerApprovedPayment(paymentId, reference, null);
     if (!result.verified) return res.status(500).json({ received: true, processed: false });
     return res.sendStatus(200);
