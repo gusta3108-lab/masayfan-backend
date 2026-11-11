@@ -69,8 +69,8 @@ require.cache[mpPath] = {
 };
 
 const app = require('../server');
-const admin = require('firebase-admin');
-const firestore = admin.firestore();
+const { getFirestore } = require('firebase-admin/firestore');
+const firestore = getFirestore();
 const { randomUUID } = crypto;
 
 let server;
