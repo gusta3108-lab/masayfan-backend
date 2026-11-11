@@ -184,6 +184,28 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(invalidSignature.status, 401);
     assert.equal(globalThis.__masayMockPaymentFetches, 0, 'una firma inválida no debe consultar ni procesar el pago');
 
+    // Una firma válida no basta: el importe debe coincidir con la orden pendiente.
+    globalThis.__masayMockPayment.transaction_amount = 99;
+    const mismatchedAmount = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedWebhookHeaders('987654321', 'emulator-wrong-amount', process.env.MP_WEBHOOK_SECRET)
+      },
+      body: webhookBody
+    });
+    assert.equal(mismatchedAmount.status, 500);
+    assert.equal(globalThis.__masayMockPaymentFetches, 1);
+    assert.equal(
+      (await firestore.collection('pagos_pendientes').doc(body.external_reference).get()).exists,
+      true,
+      'un importe incorrecto no debe cerrar la orden pendiente'
+    );
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 1);
+
+    globalThis.__masayMockPayment.transaction_amount = 100;
     const webhook = await fetch(webhookUrl, {
       method: 'POST',
       headers: {
@@ -193,7 +215,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       body: webhookBody
     });
     assert.equal(webhook.status, 200);
-    assert.equal(globalThis.__masayMockPaymentFetches, 1);
+    assert.equal(globalThis.__masayMockPaymentFetches, 2);
 
     const savedOrder = await firestore.collection('pedidos').doc(body.external_reference).get();
     assert.equal(savedOrder.exists, true);
@@ -222,7 +244,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       }
     );
     assert.equal(duplicate.status, 200);
-    assert.equal(globalThis.__masayMockPaymentFetches, 2, 'cada webhook consulta el pago una sola vez');
+    assert.equal(globalThis.__masayMockPaymentFetches, 3, 'cada webhook consulta el pago una sola vez');
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 3);
     assert.equal(product.stockReserved, 0);
