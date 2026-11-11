@@ -1,6 +1,6 @@
 const express = require('express');
 const crypto = require('node:crypto');
-const { canTransitionOrderStatus } = require('./lib/order-status');
+const { canTransitionOrderStatus, canRejectOrder } = require('./lib/order-status');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const {
@@ -468,9 +468,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
         throw new Error('INVALID_STATUS_TRANSITION');
       }
       if (currentStatus === newStatus) return;
-      if (newStatus === 'rechazado'
-        && order.paymentMethod === 'mercadopago'
-        && order.paymentStatus !== 'refunded') {
+      if (newStatus === 'rechazado' && !canRejectOrder(order)) {
         throw new Error('PAYMENT_REFUND_REQUIRED');
       }
       if (newStatus === 'rechazado'
