@@ -377,6 +377,37 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(secondBody.checked, 0);
     product = (await productRef.get()).data();
     assert.equal(product.stockReserved, 1);
+
+    await t.test('el endpoint informa cuando supera el límite de 1000 reservas por ejecución', async () => {
+      const ids = Array.from({ length: 1001 }, () => 'http-cleanup-page-' + randomUUID());
+      for (let offset = 0; offset < ids.length; offset += 450) {
+        const batch = firestore.batch();
+        ids.slice(offset, offset + 450).forEach(id => {
+          batch.set(firestore.collection('pagos_pendientes').doc(id), {
+            inventoryReleased: true,
+            expiresAt: expiredAt
+          });
+        });
+        await batch.commit();
+      }
+
+      try {
+        const response = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
+        const body = await response.json();
+        assert.equal(response.status, 200, JSON.stringify(body));
+        assert.equal(body.checked, 1000);
+        assert.equal(body.truncated, true);
+        assert.equal(body.success, false, 'el proceso no debe informar éxito si quedan documentos por revisar');
+      } finally {
+        for (let offset = 0; offset < ids.length; offset += 450) {
+          const batch = firestore.batch();
+          ids.slice(offset, offset + 450).forEach(id => {
+            batch.delete(firestore.collection('pagos_pendientes').doc(id));
+          });
+          await batch.commit();
+        }
+      }
+    });
   });
 
   await t.test('el rechazo de un pago Mercado Pago exige devolución y restaura stock una sola vez', async () => {
