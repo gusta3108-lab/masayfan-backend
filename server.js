@@ -100,10 +100,15 @@ async function reserveInventory(transaction, items) {
     if (!snap.exists) throw new Error('Uno de los productos ya no existe.');
     const product = snap.data();
     if (product.stockManaged !== true) return;
-    const quantity = Number(product.stockQuantity || 0);
-    const reserved = Number(product.stockReserved || 0);
-    const available = Math.max(0, quantity - reserved);
-    if (!Number.isInteger(item.qty) || item.qty > available) {
+    const quantity = Number(product.stockQuantity ?? 0);
+    const reserved = Number(product.stockReserved ?? 0);
+    // Ante datos corruptos, fallar de forma segura: nunca interpretar NaN como stock libre.
+    if (!Number.isSafeInteger(quantity) || quantity < 0
+      || !Number.isSafeInteger(reserved) || reserved < 0 || reserved > quantity) {
+      throw new Error('El inventario de ' + String(product.name || product.nombre || 'un producto') + ' tiene cantidades inválidas. Revisalo desde administración.');
+    }
+    const available = quantity - reserved;
+    if (!Number.isSafeInteger(item.qty) || item.qty < 1 || item.qty > available) {
       const productName = String(product.name || product.nombre || 'Producto');
       throw new Error('STOCK_INSUFFICIENT:' + productName + ':' + available);
     }
@@ -124,9 +129,12 @@ async function releasePendingInventory(pendingRef) {
     requirements.forEach((item, index) => {
       const snap = snapshots[index];
       if (!snap.exists) return;
-      const reserved = Number(snap.data().stockReserved || 0);
-      // Liberar también reservas de productos cuyo control se desactivó después del checkout.
-      if (reserved > 0) transaction.update(refs[index], { stockReserved: Math.max(0, reserved - item.qty) });
+      const reserved = Number(snap.data().stockReserved ?? 0);
+      // Nunca reducir a cero silenciosamente: eso podría liberar unidades de otro pedido.
+      if (!Number.isSafeInteger(reserved) || reserved < item.qty) {
+        throw new Error('No coincide el inventario reservado para liberar el pago pendiente.');
+      }
+      transaction.update(refs[index], { stockReserved: reserved - item.qty });
     });
     transaction.update(pendingRef, { inventoryReleased: true, inventoryReleasedAt: admin.firestore.FieldValue.serverTimestamp() });
     return true;
@@ -141,11 +149,17 @@ async function completeInventorySale(transaction, items, hasReservation = false)
     const snap = snapshots[index];
     if (!snap.exists) throw new Error('El producto asociado al pedido ya no existe.');
     const product = snap.data();
-    const quantity = Number(product.stockQuantity || 0);
-    const reserved = Number(product.stockReserved || 0);
-    // Una reserva existente debe consumirse aunque el control se haya desactivado después.
-    if (product.stockManaged !== true && !(hasReservation && reserved > 0)) return;
-    if (hasReservation && reserved < item.qty) throw new Error('La reserva de inventario no coincide con el pedido.');
+    const quantity = Number(product.stockQuantity ?? 0);
+    const reserved = Number(product.stockReserved ?? 0);
+    // La integridad del contador se valida antes de calcular disponibilidad o consumir reservas.
+    if (hasReservation && (!Number.isSafeInteger(reserved) || reserved < item.qty)) {
+      throw new Error('La reserva de inventario no coincide con el pedido.');
+    }
+    if (product.stockManaged !== true && !hasReservation) return;
+    if (!Number.isSafeInteger(quantity) || quantity < 0
+      || !Number.isSafeInteger(reserved) || reserved < 0 || reserved > quantity) {
+      throw new Error('El inventario del producto tiene cantidades inválidas. Revisalo desde administración.');
+    }
     if (!hasReservation && quantity - reserved < item.qty) {
       throw new Error('STOCK_INSUFFICIENT:' + String(product.name || product.nombre || 'Producto') + ':' + Math.max(0, quantity - reserved));
     }
