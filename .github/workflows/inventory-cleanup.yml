@@ -1,5 +1,5 @@
 name: Inventory reservation cleanup
-run-name: "Inventory cleanup (\${{ github.event_name }})"
+run-name: "Inventory cleanup (${{ github.event_name }})"
 
 on:
   schedule:
@@ -40,4 +40,4 @@ jobs:
       - name: Release expired inventory reservations
         run: npm run cleanup:inventory
         env:
-          INVENTORY_CLEANUP_SECRET: \${{ secrets.INVENTORY_CLEANUP_SECRET }}
+          INVENTORY_CLEANUP_SECRET: ${{ secrets.INVENTORY_CLEANUP_SECRET }}
