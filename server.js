@@ -423,6 +423,7 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
     let released = 0;
     let failed = 0;
     let checked = 0;
+    let truncated = false;
 
     // Paginar dentro de una ejecución evita que 100 documentos dañados al inicio
     // bloqueen indefinidamente la liberación de reservas vencidas posteriores.
@@ -448,8 +449,27 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
         }
       }
       if (expired.size < pageSize) break;
+
+      // Si se agotó el presupuesto de páginas, comprobar si quedan documentos.
+      // No informar éxito silencioso cuando todavía existe trabajo pendiente.
+      if (page === maxPages - 1) {
+        const remaining = await pendingCollection
+          .where('expiresAt', '<=', now)
+          .orderBy('expiresAt')
+          .startAfter(cursor)
+          .limit(1)
+          .get();
+        truncated = !remaining.empty;
+      }
     }
-    return res.json({ success: failed === 0, released, failed, checked, maxPages });
+    return res.json({
+      success: failed === 0 && !truncated,
+      released,
+      failed,
+      checked,
+      maxPages,
+      truncated
+    });
   } catch (error) {
     console.error('Error liberando reservas vencidas:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudieron liberar las reservas vencidas.' });

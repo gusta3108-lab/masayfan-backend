@@ -356,6 +356,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(firstBody.released, 1);
     assert.equal(firstBody.failed, 0);
     assert.equal(firstBody.checked, 1);
+    assert.equal(firstBody.truncated, false);
 
     let product = (await productRef.get()).data();
     assert.equal(product.stockQuantity, 4);
@@ -375,8 +376,10 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(secondBody.released, 0);
     assert.equal(secondBody.failed, 0);
     assert.equal(secondBody.checked, 0);
+    assert.equal(secondBody.truncated, false);
     product = (await productRef.get()).data();
     assert.equal(product.stockReserved, 1);
+
   });
 
   await t.test('el rechazo de un pago Mercado Pago exige devolución y restaura stock una sola vez', async () => {
