@@ -384,21 +384,26 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     const pricedItems = await priceCartItems(items);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
     const orderRef = firestore.collection('pedidos').doc();
-    await orderRef.create({
-      clientName, clientPhone, address, notes,
-      items: pricedItems,
-      total,
-      uid: user.uid,
-      userEmail: user.email,
-      status: 'nuevo',
-      paymentMethod: 'efectivo',
-      paymentStatus: 'pending',
-      createdAt: new Date().toISOString()
+    await firestore.runTransaction(async transaction => {
+      await completeInventorySale(transaction, pricedItems, false);
+      transaction.create(orderRef, {
+        clientName, clientPhone, address, notes,
+        items: pricedItems,
+        total,
+        uid: user.uid,
+        userEmail: user.email,
+        status: 'nuevo',
+        paymentMethod: 'efectivo',
+        paymentStatus: 'pending',
+        inventoryCommitted: true,
+        createdAt: new Date().toISOString()
+      });
     });
     return res.status(201).json({ success: true, order_id: orderRef.id });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error registrando pedido en efectivo:', error.message);
+    if (stockErrorResponse(error, res)) return;
     return res.status(authError ? 401 : 400).json({
       success: false,
       error: authError ? 'La sesión expiró. Volvé a iniciar sesión.' : error.message
