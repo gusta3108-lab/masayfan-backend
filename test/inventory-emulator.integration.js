@@ -18,6 +18,28 @@ const inventory = createInventoryService({ getFirestore: () => firestore, admin 
 const item = (productId, qty = 1) => [{ stockProductId: productId, qty }];
 const unique = prefix => prefix + '-' + randomUUID();
 
+test('cleanup refuses to mutate reservations when stock counters are inconsistent', async () => {
+  const productId = unique('corrupt-release-product');
+  const pendingId = unique('corrupt-release-pending');
+  const productRef = firestore.collection('productos').doc(productId);
+  const pendingRef = firestore.collection('pagos_pendientes').doc(pendingId);
+  await productRef.set({ name: 'Producto con reserva corrupta', stockManaged: true, stockQuantity: 1, stockReserved: 2 });
+  await pendingRef.set({
+    order: { items: item(productId) },
+    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() - 60000))
+  });
+
+  await assert.rejects(
+    inventory.releasePendingInventory(pendingRef),
+    /contadores están dañados/
+  );
+  const product = (await productRef.get()).data();
+  const pending = (await pendingRef.get()).data();
+  assert.equal(product.stockQuantity, 1);
+  assert.equal(product.stockReserved, 2);
+  assert.equal(pending.inventoryReleased, undefined);
+});
+
 test('two concurrent buyers cannot reserve the final unit', async () => {
   const productId = unique('race-product');
   const productRef = firestore.collection('productos').doc(productId);
