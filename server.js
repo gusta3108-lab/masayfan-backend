@@ -556,49 +556,68 @@ app.post('/api/crear-preferencia', async (req, res) => {
     const reservationMinutes = 30;
     const reservationStart = new Date();
     const reservationEnd = new Date(reservationStart.getTime() + reservationMinutes * 60 * 1000);
-    const result = await preference.create({
-      body: {
-        items: pricedItems.map(item => ({
-          title: item.name,
-          quantity: item.qty,
-          unit_price: item.price,
-          currency_id: 'ARS'
-        })),
-        payer: { email: user.email, name: clientName, phone: { number: clientPhone } },
-        external_reference: externalReference,
-        metadata: { external_reference: externalReference, user_uid: user.uid },
-        expiration_date_from: reservationStart.toISOString(),
-        expiration_date_to: reservationEnd.toISOString(),
-        back_urls: {
-          success: 'https://www.masivfantasias.com/?mp_return=1',
-          failure: 'https://www.masivfantasias.com/?mp_return=1',
-          pending: 'https://www.masivfantasias.com/?mp_return=1'
-        },
-        notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
-        auto_return: 'approved'
-      }
-    });
-
     const orderData = {
       clientName, clientPhone, address, notes,
       items: pricedItems,
       total
     };
     const pendingRef = firestore.collection('pagos_pendientes').doc(externalReference);
+
+    // Reservar el stock y crear el pendiente ANTES de crear la preferencia.
+    // Así nunca se entrega un link de pago sin una reserva persistida en Firestore.
     await firestore.runTransaction(async transaction => {
       await reserveInventory(transaction, pricedItems);
       transaction.create(pendingRef, {
         uid: user.uid,
         userEmail: user.email,
         total,
-        preferenceId: String(result.id),
+        preferenceId: null,
         order: orderData,
+        inventoryReleased: false,
         expiresAt: admin.firestore.Timestamp.fromDate(reservationEnd),
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       });
     });
 
-    res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString() });
+    try {
+      const result = await preference.create({
+        body: {
+          items: pricedItems.map(item => ({
+            title: item.name,
+            quantity: item.qty,
+            unit_price: item.price,
+            currency_id: 'ARS'
+          })),
+          payer: { email: user.email, name: clientName, phone: { number: clientPhone } },
+          external_reference: externalReference,
+          metadata: { external_reference: externalReference, user_uid: user.uid },
+          expiration_date_from: reservationStart.toISOString(),
+          expiration_date_to: reservationEnd.toISOString(),
+          back_urls: {
+            success: 'https://www.masivfantasias.com/?mp_return=1',
+            failure: 'https://www.masivfantasias.com/?mp_return=1',
+            pending: 'https://www.masivfantasias.com/?mp_return=1'
+          },
+          notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
+          auto_return: 'approved'
+        }
+      });
+
+      // El enlace solo se entrega después de persistir el ID de preferencia.
+      await pendingRef.update({
+        preferenceId: String(result.id),
+        preferenceCreatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString() });
+    } catch (preferenceError) {
+      // Si Mercado Pago falla, liberar la reserva para no inmovilizar unidades.
+      try {
+        await releasePendingInventory(pendingRef);
+      } catch (cleanupError) {
+        console.error('No se pudo liberar la reserva tras fallar la preferencia:', cleanupError.message);
+      }
+      throw preferenceError;
+    }
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error creando preferencia:', error.message);
