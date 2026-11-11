@@ -19,8 +19,19 @@ async function releaseExpiredInventory({
   if (!response.ok) {
     throw new Error('La limpieza de inventario respondió HTTP ' + response.status + ': ' + body.slice(0, 500));
   }
-  process.stdout.write(body + '\\n');
-  return { status: response.status, body };
+
+  let result;
+  try {
+    result = JSON.parse(body);
+  } catch (_error) {
+    throw new Error('La limpieza de inventario devolvió una respuesta JSON inválida.');
+  }
+  if (result.success !== true || Number(result.failed || 0) > 0) {
+    throw new Error('La limpieza de inventario informó fallas: ' + JSON.stringify(result).slice(0, 500));
+  }
+
+  process.stdout.write(body + '\n');
+  return { status: response.status, body, result };
 }
 
 if (require.main === module) {
