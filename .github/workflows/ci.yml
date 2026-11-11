@@ -29,6 +29,10 @@ jobs:
           java-version: '21'
       - name: Install dependencies
         run: npm install --ignore-scripts
+      - name: Report dependency audit findings (diagnostic only)
+        run: |
+          npm audit --json > /tmp/npm-audit.json || true
+          node -e "const a=require('/tmp/npm-audit.json'); console.log(JSON.stringify({metadata:a.metadata?.vulnerabilities, advisories:Object.entries(a.vulnerabilities||{}).map(([name,v])=>({name,severity:v.severity,isDirect:v.isDirect,range:v.range,fixAvailable:v.fixAvailable,via:v.via.map(x=>typeof x==='string'?x:{title:x.title,url:x.url,range:x.range})}))},null,2))"
       - name: Check JavaScript syntax
         run: node --check server.js && node --check lib/customer-account.js && node --check lib/inventory.js && node --check scripts/release-expired-inventory.js
       - name: Run unit tests
