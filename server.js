@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('node:crypto');
+const { canTransitionOrderStatus } = require('./lib/order-status');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const {
@@ -463,16 +464,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
       const currentStatus = String(order.status || 'nuevo');
-      const allowedNextStatuses = {
-        nuevo: ['preparacion', 'rechazado'],
-        aceptado: ['listo', 'rechazado'],
-        preparacion: ['listo', 'rechazado'],
-        listo: ['finalizado', 'rechazado'],
-        finalizado: [],
-        rechazado: []
-      };
-      if (currentStatus !== newStatus
-        && !(allowedNextStatuses[currentStatus] || []).includes(newStatus)) {
+      if (!canTransitionOrderStatus(currentStatus, newStatus)) {
         throw new Error('INVALID_STATUS_TRANSITION');
       }
       if (currentStatus === newStatus) return;
