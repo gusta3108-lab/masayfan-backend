@@ -6,6 +6,7 @@ on:
       - main
       - fix/verified-mercadopago-payments
       - deploy/inventory-live
+      - test/current-inventory-emulator
   pull_request:
     branches:
       - main
