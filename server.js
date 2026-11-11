@@ -641,7 +641,33 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
           replayed = true;
           return;
         }
-        if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
+        if (previous.status === 'processing') {
+          const createdAt = previous.createdAt?.toDate ? previous.createdAt.toDate() : null;
+          const ageMs = createdAt ? Date.now() - createdAt.getTime() : 0;
+          if (ageMs >= 5 * 60 * 1000) {
+            const incidentRef = firestore.collection('incidencias_checkout').doc(idempotency.ref.id);
+            const incidentSnap = await transaction.get(incidentRef);
+            if (!incidentSnap.exists) {
+              transaction.create(incidentRef, {
+                type: 'mercadopago_preference_creation_interrupted',
+                status: 'needs_admin_review',
+                uid: user.uid,
+                userEmail: user.email,
+                externalReference: previous.externalReference || null,
+                checkoutRequestId: idempotency.ref.id,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                description: 'El intento quedó en processing más de cinco minutos. Verificar en Mercado Pago si se creó una preferencia antes de liberar la reserva o reintentar.'
+              });
+            }
+            transaction.update(idempotency.ref, {
+              status: 'needs_review',
+              needsReviewAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            throw new Error('IDEMPOTENCY_NEEDS_REVIEW');
+          }
+          throw new Error('IDEMPOTENCY_PROCESSING');
+        }
+        if (previous.status === 'needs_review') throw new Error('IDEMPOTENCY_NEEDS_REVIEW');
       }
       await completeInventorySale(transaction, pricedItems, false);
       transaction.create(orderRef, {
