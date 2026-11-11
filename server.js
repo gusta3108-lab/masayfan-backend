@@ -462,10 +462,21 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       const orderSnap = await transaction.get(orderRef);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
-      if (order.status === 'rechazado' && newStatus !== 'rechazado') {
-        throw new Error('No se puede reabrir un pedido rechazado; creá un nuevo pedido.');
+      const currentStatus = String(order.status || 'nuevo');
+      const allowedNextStatuses = {
+        nuevo: ['preparacion', 'rechazado'],
+        aceptado: ['listo', 'rechazado'],
+        preparacion: ['listo', 'rechazado'],
+        listo: ['finalizado', 'rechazado'],
+        finalizado: [],
+        rechazado: []
+      };
+      if (currentStatus !== newStatus
+        && !(allowedNextStatuses[currentStatus] || []).includes(newStatus)) {
+        throw new Error('INVALID_STATUS_TRANSITION');
       }
-      if (newStatus === 'rechazado' && order.status !== 'rechazado'
+      if (currentStatus === newStatus) return;
+      if (newStatus === 'rechazado'
         && order.inventoryCommitted === true && order.inventoryRestored !== true) {
         const requirements = stockRequirements(order.items || []);
         const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
@@ -493,6 +504,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
     return res.json({ success: true, order_id: orderId, status: newStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'INVALID_STATUS_TRANSITION') return res.status(409).json({ success: false, error: 'Ese cambio de estado no está permitido. Los pedidos entregados o rechazados no se pueden reabrir ni rechazar nuevamente.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para modificar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error actualizando estado del pedido:', error.message);
