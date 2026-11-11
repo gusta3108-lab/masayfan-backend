@@ -99,7 +99,9 @@ async function reserveInventory(transaction, items) {
     const snap = snapshots[index];
     if (!snap.exists) throw new Error('Uno de los productos ya no existe.');
     const product = snap.data();
-    if (product.stockManaged !== true) return;
+    // La existencia de stockQuantity también identifica inventario histórico:
+    // no dejar que un flag desactivado saltee reservas o ventas tardías.
+    if (product.stockManaged !== true && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
     const quantity = Number(product.stockQuantity ?? 0);
     const reserved = Number(product.stockReserved ?? 0);
     // Ante datos corruptos, fallar de forma segura: nunca interpretar NaN como stock libre.
@@ -162,7 +164,8 @@ async function completeInventorySale(transaction, items, hasReservation = false)
     if (hasReservation && (!Number.isSafeInteger(reserved) || reserved < item.qty)) {
       throw new Error('La reserva de inventario no coincide con el pedido.');
     }
-    if (product.stockManaged !== true && !hasReservation) return;
+    if (product.stockManaged !== true && !hasReservation
+      && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
     if (!Number.isSafeInteger(quantity) || quantity < 0
       || !Number.isSafeInteger(reserved) || reserved < 0 || reserved > quantity) {
       throw new Error('El inventario del producto tiene cantidades inválidas. Revisalo desde administración.');
