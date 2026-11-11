@@ -451,6 +451,35 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
   }
 });
 
+app.post('/api/admin/orders/:orderId/delete', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) {
+      return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    }
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      if (order.inventoryCommitted === true && order.inventoryRestored !== true) {
+        throw new Error('INVENTORY_NOT_RESTORED');
+      }
+      transaction.delete(orderRef);
+    });
+    return res.json({ success: true, order_id: orderId });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'INVENTORY_NOT_RESTORED') return res.status(409).json({ success: false, error: 'Primero rechazá el pedido para devolver las unidades al inventario.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para eliminar pedidos.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error eliminando pedido:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo eliminar el pedido.' });
+  }
+});
+
 app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
