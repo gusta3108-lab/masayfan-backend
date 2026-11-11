@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('node:crypto');
 const { canTransitionOrderStatus, canRejectOrder } = require('./lib/order-status');
+const { requireCustomerAccount } = require('./lib/customer-account');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const {
@@ -83,12 +84,6 @@ async function authenticatedAdmin(req) {
   const user = await authenticatedUser(req);
   const adminSnap = await firestore.collection('administradores').doc(user.email).get();
   if (!adminSnap.exists) throw new Error('ADMIN_REQUIRED');
-  return user;
-}
-
-async function requireCustomerAccount(user) {
-  const adminSnap = await firestore.collection('administradores').doc(user.email).get();
-  if (adminSnap.exists) throw new Error('ADMIN_CANNOT_PURCHASE');
   return user;
 }
 
@@ -664,7 +659,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
-    await requireCustomerAccount(user);
+    await requireCustomerAccount(user, firestore);
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
