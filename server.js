@@ -112,6 +112,26 @@ async function reserveInventory(transaction, items) {
   return requirements;
 }
 
+async function releasePendingInventory(pendingRef) {
+  return firestore.runTransaction(async transaction => {
+    const pendingSnap = await transaction.get(pendingRef);
+    if (!pendingSnap.exists) return false;
+    const pending = pendingSnap.data();
+    if (pending.inventoryReleased === true) return false;
+    const requirements = stockRequirements(pending.order?.items || []);
+    const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
+    const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
+    requirements.forEach((item, index) => {
+      const snap = snapshots[index];
+      if (!snap.exists || snap.data().stockManaged !== true) return;
+      const reserved = Number(snap.data().stockReserved || 0);
+      transaction.update(refs[index], { stockReserved: Math.max(0, reserved - item.qty) });
+    });
+    transaction.update(pendingRef, { inventoryReleased: true, inventoryReleasedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return true;
+  });
+}
+
 async function completeInventorySale(transaction, items, hasReservation = false) {
   const requirements = stockRequirements(items);
   const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
@@ -317,6 +337,30 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
 
   return { verified: true, alreadyRegistered: false };
 }
+
+app.post('/api/internal/release-expired-inventory', async (req, res) => {
+  const expectedSecret = process.env.INVENTORY_CLEANUP_SECRET;
+  if (!expectedSecret || req.get('x-inventory-cleanup-secret') !== expectedSecret) {
+    return res.sendStatus(401);
+  }
+  if (!requireFirebaseServices(res)) return;
+  try {
+    const now = admin.firestore.Timestamp.now();
+    const expired = await firestore.collection('pagos_pendientes')
+      .where('expiresAt', '<=', now)
+      .where('inventoryReleased', '!=', true)
+      .limit(100)
+      .get();
+    let released = 0;
+    for (const pendingDoc of expired.docs) {
+      if (await releasePendingInventory(pendingDoc.ref)) released += 1;
+    }
+    return res.json({ success: true, released, checked: expired.size });
+  } catch (error) {
+    console.error('Error liberando reservas vencidas:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudieron liberar las reservas vencidas.' });
+  }
+});
 
 app.get('/health', (_req, res) => {
   res.json({
