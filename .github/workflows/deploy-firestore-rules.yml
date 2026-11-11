@@ -1,0 +1,53 @@
+name: Deploy Firestore rules
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/verified-mercadopago-payments
+    paths:
+      - firestore.rules
+      - firebase.json
+      - .github/workflows/deploy-firestore-rules.yml
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: firebase-firestore-rules-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish Firestore rules to production
+    runs-on: ubuntu-latest
+    environment: firebase-production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Firebase configuration
+        run: |
+          test -s firestore.rules
+          node -e "const c=require('./firebase.json'); if(c.firestore?.rules !== 'firestore.rules') process.exit(1)"
+
+      - name: Authenticate to Google Cloud with GitHub OIDC
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.FIREBASE_DEPLOY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Deploy Firestore security rules
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+        run: npx --yes firebase-tools@14.22.0 deploy --only firestore:rules --project masayfantasias --non-interactive
+
+      - name: Report deployment target
+        run: echo "Firestore rules deployment command completed for Firebase project masayfantasias."
