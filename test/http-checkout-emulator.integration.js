@@ -150,15 +150,40 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(savedOrder.exists, true);
     assert.equal(savedOrder.data().paymentMethod, 'efectivo');
     assert.equal(savedOrder.data().uid, userUid);
-    const product = (await firestore.collection('productos').doc(productId).get()).data();
+    let product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
     assert.equal(product.stockReserved, 0);
+
+    const replay = await fetch(baseUrl + '/api/pedidos/efectivo', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ items, order })
+    });
+    const replayBody = await replay.json();
+    assert.equal(replay.status, 200, JSON.stringify(replayBody));
+    assert.equal(replayBody.replayed, true);
+    assert.equal(replayBody.order_id, body.order_id);
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4, 'repetir el checkout en efectivo no debe descontar stock otra vez');
+
+    const crossMethodReuse = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ items, order })
+    });
+    const crossMethodBody = await crossMethodReuse.json();
+    assert.equal(crossMethodReuse.status, 409, JSON.stringify(crossMethodBody));
+    assert.match(crossMethodBody.error, /intento de compra ya fue utilizado/i);
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 0, 'reutilizar la clave entre métodos no debe reservar stock');
   });
 
   await t.test('Mercado Pago reserva stock y el webhook simulado confirma una sola venta', async () => {
+    const mpIdempotencyKey = randomUUID();
     const response = await fetch(baseUrl + '/api/crear-preferencia', {
       method: 'POST',
-      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      headers: { ...headers, 'Idempotency-Key': mpIdempotencyKey },
       body: JSON.stringify({ items, order })
     });
     const body = await response.json();
@@ -167,9 +192,20 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(body.init_point, 'https://sandbox.invalid/checkout/emulator');
     assert.equal(globalThis.__masayMockPreference.external_reference, body.external_reference);
 
+    const replay = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': mpIdempotencyKey },
+      body: JSON.stringify({ items, order })
+    });
+    const replayBody = await replay.json();
+    assert.equal(replay.status, 200, JSON.stringify(replayBody));
+    assert.equal(replayBody.replayed, true);
+    assert.equal(replayBody.external_reference, body.external_reference);
+    assert.equal(replayBody.init_point, body.init_point);
+
     let product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
-    assert.equal(product.stockReserved, 1);
+    assert.equal(product.stockReserved, 1, 'repetir Mercado Pago no debe duplicar la reserva');
 
     globalThis.__masayMockPayment = {
       id: '987654321',
