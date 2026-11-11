@@ -1,0 +1,37 @@
+name: Inventory reservation cleanup
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inventory-reservation-cleanup
+  cancel-in-progress: false
+
+jobs:
+  release-expired-reservations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout backend with cleanup script
+        uses: actions/checkout@v4
+        with:
+          ref: fix/verified-mercadopago-payments
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Release expired inventory reservations
+        run: npm run cleanup:inventory
+        env:
+          INVENTORY_CLEANUP_SECRET: ${{ secrets.INVENTORY_CLEANUP_SECRET }}
