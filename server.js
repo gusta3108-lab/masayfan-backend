@@ -447,23 +447,40 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
   if (!requireFirebaseServices(res)) return;
   try {
     const now = admin.firestore.Timestamp.now();
-    const expired = await firestore.collection('pagos_pendientes')
-      .where('expiresAt', '<=', now)
-      .limit(100)
-      .get();
+    const pendingCollection = firestore.collection('pagos_pendientes');
+    const pageSize = 100;
+    const maxPages = 10;
+    let cursor = null;
     let released = 0;
     let failed = 0;
-    for (const pendingDoc of expired.docs) {
-      if (pendingDoc.data().inventoryReleased === true) continue;
-      try {
-        if (await releasePendingInventory(pendingDoc.ref)) released += 1;
-      } catch (cleanupError) {
-        failed += 1;
-        // Un registro dañado no debe impedir liberar las demás reservas vencidas.
-        console.error('No se pudo liberar una reserva vencida:', pendingDoc.id, cleanupError.message);
+    let checked = 0;
+
+    // Paginar dentro de una ejecución evita que 100 documentos dañados al inicio
+    // bloqueen indefinidamente la liberación de reservas vencidas posteriores.
+    for (let page = 0; page < maxPages; page += 1) {
+      let query = pendingCollection
+        .where('expiresAt', '<=', now)
+        .orderBy('expiresAt')
+        .limit(pageSize);
+      if (cursor) query = query.startAfter(cursor);
+      const expired = await query.get();
+      if (expired.empty) break;
+
+      checked += expired.size;
+      for (const pendingDoc of expired.docs) {
+        cursor = pendingDoc;
+        if (pendingDoc.data().inventoryReleased === true) continue;
+        try {
+          if (await releasePendingInventory(pendingDoc.ref)) released += 1;
+        } catch (cleanupError) {
+          failed += 1;
+          // Un registro dañado no debe impedir liberar las demás reservas vencidas.
+          console.error('No se pudo liberar una reserva vencida:', pendingDoc.id, cleanupError.message);
+        }
       }
+      if (expired.size < pageSize) break;
     }
-    return res.json({ success: failed === 0, released, failed, checked: expired.size });
+    return res.json({ success: failed === 0, released, failed, checked, maxPages });
   } catch (error) {
     console.error('Error liberando reservas vencidas:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudieron liberar las reservas vencidas.' });
