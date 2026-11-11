@@ -29,6 +29,7 @@ process.env.MP_WEBHOOK_SECRET = 'local-emulator-webhook-secret';
 
 globalThis.__masayMockPreference = null;
 globalThis.__masayMockPayment = null;
+globalThis.__masayMockPaymentFetches = 0;
 
 class MercadoPagoConfig {
   constructor() {}
@@ -41,19 +42,12 @@ class Preference {
 }
 class Payment {
   async get() {
+    globalThis.__masayMockPaymentFetches += 1;
     if (!globalThis.__masayMockPayment) throw new Error('No se configuró el pago simulado.');
     return globalThis.__masayMockPayment;
   }
 }
-class InvalidWebhookSignatureError extends Error {}
-class WebhookSignatureValidator {
-  static validate() {
-    // La firma se simula aquí: este test verifica el flujo HTTP y la lógica
-    // posterior, no la criptografía del SDK real (cubierta por su integración).
-    return true;
-  }
-}
-
+const realMercadoPago = require('mercadopago');
 const mpPath = require.resolve('mercadopago');
 require.cache[mpPath] = {
   id: mpPath,
@@ -63,8 +57,8 @@ require.cache[mpPath] = {
     MercadoPagoConfig,
     Preference,
     Payment,
-    WebhookSignatureValidator,
-    InvalidWebhookSignatureError
+    WebhookSignatureValidator: realMercadoPago.WebhookSignatureValidator,
+    InvalidWebhookSignatureError: realMercadoPago.InvalidWebhookSignatureError
   }
 };
 
@@ -72,6 +66,16 @@ const app = require('../server');
 const { getFirestore } = require('firebase-admin/firestore');
 const firestore = getFirestore();
 const { randomUUID } = crypto;
+
+function signedWebhookHeaders(dataId, requestId, secret) {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`;
+  const signature = crypto.createHmac('sha256', secret).update(manifest).digest('hex');
+  return {
+    'x-signature': `ts=${ts},v1=${signature}`,
+    'x-request-id': requestId
+  };
+}
 
 let server;
 let baseUrl;
@@ -166,19 +170,30 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       metadata: { user_uid: userUid }
     };
 
-    const webhook = await fetch(
-      baseUrl + '/api/webhook?type=payment&data.id=987654321',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-signature': 'ts=1,v1=emulator',
-          'x-request-id': 'emulator-request-1'
-        },
-        body: JSON.stringify({ type: 'payment', data: { id: '987654321' } })
-      }
-    );
+    const webhookUrl = baseUrl + '/api/webhook?type=payment&data.id=987654321';
+    const webhookBody = JSON.stringify({ type: 'payment', data: { id: '987654321' } });
+    const invalidSignature = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-signature': `ts=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}`,
+        'x-request-id': 'emulator-invalid-signature'
+      },
+      body: webhookBody
+    });
+    assert.equal(invalidSignature.status, 401);
+    assert.equal(globalThis.__masayMockPaymentFetches, 0, 'una firma inválida no debe consultar ni procesar el pago');
+
+    const webhook = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedWebhookHeaders('987654321', 'emulator-request-1', process.env.MP_WEBHOOK_SECRET)
+      },
+      body: webhookBody
+    });
     assert.equal(webhook.status, 200);
+    assert.equal(globalThis.__masayMockPaymentFetches, 1);
 
     const savedOrder = await firestore.collection('pedidos').doc(body.external_reference).get();
     assert.equal(savedOrder.exists, true);
@@ -196,18 +211,18 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
 
     // Repetir el webhook no debe crear otro pedido ni volver a descontar stock.
     const duplicate = await fetch(
-      baseUrl + '/api/webhook?type=payment&data.id=987654321',
+      webhookUrl,
       {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-signature': 'ts=1,v1=emulator',
-          'x-request-id': 'emulator-request-2'
+          ...signedWebhookHeaders('987654321', 'emulator-request-2', process.env.MP_WEBHOOK_SECRET)
         },
         body: JSON.stringify({ type: 'payment', data: { id: '987654321' } })
       }
     );
     assert.equal(duplicate.status, 200);
+    assert.equal(globalThis.__masayMockPaymentFetches, 2, 'cada webhook consulta el pago una sola vez');
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 3);
     assert.equal(product.stockReserved, 0);
