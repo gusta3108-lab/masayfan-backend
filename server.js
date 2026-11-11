@@ -136,7 +136,14 @@ async function releasePendingInventory(pendingRef) {
       }
       transaction.update(refs[index], { stockReserved: reserved - item.qty });
     });
-    transaction.update(pendingRef, { inventoryReleased: true, inventoryReleasedAt: admin.firestore.FieldValue.serverTimestamp() });
+    transaction.update(pendingRef, {
+      inventoryReleased: true,
+      inventoryReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
+      // Guardar la fecha original para auditoría y quitar expiresAt del índice
+      // de vencimientos: el documento sigue disponible para verificar pagos tardíos.
+      reservationExpiresAt: pending.expiresAt || null,
+      expiresAt: admin.firestore.FieldValue.delete()
+    });
     return true;
   });
 }
