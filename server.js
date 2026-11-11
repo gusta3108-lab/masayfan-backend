@@ -157,7 +157,10 @@ async function completeInventorySale(transaction, items, hasReservation = false)
 
 function stockErrorResponse(error, res) {
   if (!String(error.message || '').startsWith('STOCK_INSUFFICIENT:')) return false;
-  const [, productName, available] = String(error.message).split(':');
+  const message = String(error.message);
+  const separator = message.lastIndexOf(':');
+  const productName = message.slice('STOCK_INSUFFICIENT:'.length, separator);
+  const available = message.slice(separator + 1);
   res.status(409).json({
     success: false,
     code: 'STOCK_INSUFFICIENT',
