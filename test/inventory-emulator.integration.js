@@ -117,6 +117,33 @@ test('cleanup cannot release inventory after an approved sale removed the pendin
   assert.equal(product.stockReserved, 0);
 });
 
+test('legacy products without inventory fields remain outside stock control', async () => {
+  const productId = unique('legacy-product');
+  const productRef = firestore.collection('productos').doc(productId);
+  await productRef.set({ name: 'Producto antiguo', price: 100 });
+
+  await firestore.runTransaction(tx => inventory.reserveInventory(tx, item(productId, 2)));
+  await firestore.runTransaction(tx => inventory.completeInventorySale(tx, item(productId, 2), false));
+
+  const product = (await productRef.get()).data();
+  assert.equal(Object.prototype.hasOwnProperty.call(product, 'stockQuantity'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(product, 'stockReserved'), false);
+});
+
+test('corrupt stock counters fail safely instead of allowing a reservation', async () => {
+  const productId = unique('corrupt-product');
+  const productRef = firestore.collection('productos').doc(productId);
+  await productRef.set({ name: 'Producto con datos inválidos', stockManaged: true, stockQuantity: 4, stockReserved: 5 });
+
+  await assert.rejects(
+    firestore.runTransaction(tx => inventory.reserveInventory(tx, item(productId))),
+    /cantidades inválidas/
+  );
+  const product = (await productRef.get()).data();
+  assert.equal(product.stockQuantity, 4);
+  assert.equal(product.stockReserved, 5);
+});
+
 test.after(async () => {
   await admin.app().delete();
 });
