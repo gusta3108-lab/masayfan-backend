@@ -3,7 +3,9 @@ const crypto = require('node:crypto');
 const { canTransitionOrderStatus, canRejectOrder } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
 const cors = require('cors');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
 const {
   MercadoPagoConfig,
   Preference,
@@ -38,12 +40,12 @@ try {
     if (serviceAccount.project_id !== 'masayfantasias') {
       throw new Error('La cuenta de servicio no pertenece al proyecto Firebase esperado.');
     }
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+    const firebaseApp = initializeApp({
+      credential: cert(serviceAccount),
       projectId: serviceAccount.project_id
     });
-    firestore = admin.firestore();
-    firebaseAuth = admin.auth();
+    firestore = getFirestore(firebaseApp);
+    firebaseAuth = getAuth(firebaseApp);
   }
 } catch (error) {
   console.error('No se pudo inicializar Firebase Admin. Revisá FIREBASE_SERVICE_ACCOUNT_JSON.');
@@ -102,7 +104,7 @@ function checkoutIdempotency(req, user, items, order, paymentMethod) {
   return { ref: firestore.collection('checkout_requests').doc(documentId), requestHash };
 }
 const { stockRequirements, createInventoryService } = require('./lib/inventory');
-const inventoryService = createInventoryService({ getFirestore: () => firestore, admin });
+const inventoryService = createInventoryService({ getFirestore: () => firestore });
 const { reserveInventory, releasePendingInventory, completeInventorySale } = inventoryService;
 
 function stockErrorResponse(error, res) {
@@ -331,12 +333,12 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
         order: data.order,
         stockError: registrationError.message,
         reservationReleased: data.inventoryReleased === true,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp()
       });
       transaction.update(pendingRef, {
         paymentApprovedNeedsReview: true,
-        paymentApprovedAt: admin.firestore.FieldValue.serverTimestamp(),
+        paymentApprovedAt: FieldValue.serverTimestamp(),
         paymentId: String(paymentId),
         paymentIncidentId: reference
       });
@@ -352,7 +354,7 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
   }
   if (!requireFirebaseServices(res)) return;
   try {
-    const now = admin.firestore.Timestamp.now();
+    const now = Timestamp.now();
     const pendingCollection = firestore.collection('pagos_pendientes');
     const pageSize = 100;
     const maxPages = 10;
@@ -613,7 +615,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         requestHash: idempotency.requestHash,
         orderId: orderRef.id,
         status: 'completed',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: FieldValue.serverTimestamp()
       });
     });
     return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, replayed });
@@ -693,13 +695,13 @@ app.post('/api/crear-preferencia', async (req, res) => {
                 userEmail: user.email,
                 externalReference: previous.externalReference || null,
                 checkoutRequestId: idempotency.ref.id,
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: FieldValue.serverTimestamp(),
                 description: 'El intento quedó en processing más de cinco minutos. Verificar en Mercado Pago si se creó una preferencia antes de liberar la reserva o reintentar.'
               });
             }
             transaction.update(idempotency.ref, {
               status: 'needs_review',
-              needsReviewAt: admin.firestore.FieldValue.serverTimestamp()
+              needsReviewAt: FieldValue.serverTimestamp()
             });
             needsAdminReview = true;
             return;
@@ -721,8 +723,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
         initPoint: null,
         order: orderData,
         inventoryReleased: false,
-        expiresAt: admin.firestore.Timestamp.fromDate(reservationEnd),
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        expiresAt: Timestamp.fromDate(reservationEnd),
+        createdAt: FieldValue.serverTimestamp()
       });
       transaction.set(idempotency.ref, {
         uid: user.uid,
@@ -730,7 +732,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
         requestHash: idempotency.requestHash,
         externalReference,
         status: 'processing',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: FieldValue.serverTimestamp()
       });
     });
 
@@ -775,13 +777,13 @@ app.post('/api/crear-preferencia', async (req, res) => {
       await pendingRef.update({
         preferenceId: String(result.id),
         initPoint: result.init_point,
-        preferenceCreatedAt: admin.firestore.FieldValue.serverTimestamp()
+        preferenceCreatedAt: FieldValue.serverTimestamp()
       });
       await idempotency.ref.update({
         status: 'completed',
         initPoint: result.init_point,
         preferenceId: String(result.id),
-        completedAt: admin.firestore.FieldValue.serverTimestamp()
+        completedAt: FieldValue.serverTimestamp()
       });
       return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString(), replayed: false });
     } catch (preferenceError) {
@@ -799,7 +801,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
             transaction.update(pendingRef, {
               preferenceCreationNeedsReview: true,
               preferenceCreationError: String(preferenceError.message || 'Error desconocido').slice(0, 500),
-              preferenceCreationFailedAt: admin.firestore.FieldValue.serverTimestamp()
+              preferenceCreationFailedAt: FieldValue.serverTimestamp()
             });
           }
           if (!existingIncident.exists) {
@@ -814,12 +816,12 @@ app.post('/api/crear-preferencia', async (req, res) => {
               currency: 'ARS',
               stockReservationExpiresAt: reservationEnd.toISOString(),
               error: String(preferenceError.message || 'Error desconocido').slice(0, 500),
-              createdAt: admin.firestore.FieldValue.serverTimestamp()
+              createdAt: FieldValue.serverTimestamp()
             });
           }
           transaction.set(idempotency.ref, {
             status: 'needs_review',
-            needsReviewAt: admin.firestore.FieldValue.serverTimestamp()
+            needsReviewAt: FieldValue.serverTimestamp()
           }, { merge: true });
         });
       } catch (reviewError) {
@@ -875,7 +877,7 @@ async function updateReversedPayment(paymentId, reference, status) {
     if (order.paymentStatus !== 'approved') return false;
     transaction.update(orderRef, {
       paymentStatus: status,
-      paymentStatusUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+      paymentStatusUpdatedAt: FieldValue.serverTimestamp()
     });
     return true;
   });
