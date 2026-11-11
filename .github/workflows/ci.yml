@@ -29,6 +29,8 @@ jobs:
           java-version: '21'
       - name: Install dependencies
         run: npm install --ignore-scripts
+      - name: Check dependency vulnerabilities
+        run: npm audit --audit-level=moderate
       - name: Check JavaScript syntax
         run: node --check server.js && node --check lib/customer-account.js && node --check lib/inventory.js && node --check scripts/release-expired-inventory.js
       - name: Run unit tests
