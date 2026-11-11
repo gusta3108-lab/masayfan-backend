@@ -2,7 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const admin = require('firebase-admin');
+const { initializeApp, getApps } = require('firebase-admin/app');
+const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 const { randomUUID } = require('node:crypto');
 const { createInventoryService } = require('../lib/inventory');
 
@@ -11,9 +12,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 }
 
 const projectId = 'demo-masayfantasias';
-admin.initializeApp({ projectId });
-const firestore = admin.firestore();
-const inventory = createInventoryService({ getFirestore: () => firestore, admin });
+const firebaseApp = initializeApp({ projectId });
+const firestore = getFirestore(firebaseApp);
+const inventory = createInventoryService({ getFirestore: () => firestore });
 
 const item = (productId, qty = 1) => [{ stockProductId: productId, qty }];
 const unique = prefix => prefix + '-' + randomUUID();
@@ -26,7 +27,7 @@ test('cleanup refuses to mutate reservations when stock counters are inconsisten
   await productRef.set({ name: 'Producto con reserva corrupta', stockManaged: true, stockQuantity: 1, stockReserved: 2 });
   await pendingRef.set({
     order: { items: item(productId) },
-    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() - 60000))
+    expiresAt: Timestamp.fromDate(new Date(Date.now() - 60000))
   });
 
   await assert.rejects(
@@ -82,7 +83,7 @@ test('concurrent cleanup attempts release one reservation exactly once', async (
   await productRef.set({ name: 'Producto de prueba', stockManaged: true, stockQuantity: 5, stockReserved: 1 });
   await pendingRef.set({
     order: { items: item(productId) },
-    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() - 60000))
+    expiresAt: Timestamp.fromDate(new Date(Date.now() - 60000))
   });
 
   const released = await Promise.all([
@@ -105,7 +106,7 @@ test('late approval after expiry consumes remaining stock without reusing the ol
   await productRef.set({ name: 'Producto de prueba', stockManaged: true, stockQuantity: 2, stockReserved: 1 });
   await pendingRef.set({
     order: { items: item(productId) },
-    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() - 60000))
+    expiresAt: Timestamp.fromDate(new Date(Date.now() - 60000))
   });
 
   await inventory.releasePendingInventory(pendingRef);
@@ -124,7 +125,7 @@ test('late approval is blocked if another sale consumed the units after expiry',
   await productRef.set({ name: 'Producto de prueba', stockManaged: true, stockQuantity: 1, stockReserved: 1 });
   await pendingRef.set({
     order: { items: item(productId) },
-    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() - 60000))
+    expiresAt: Timestamp.fromDate(new Date(Date.now() - 60000))
   });
 
   await inventory.releasePendingInventory(pendingRef);
@@ -146,7 +147,7 @@ test('cleanup cannot release inventory after an approved sale removed the pendin
   await productRef.set({ name: 'Producto de prueba', stockManaged: true, stockQuantity: 3, stockReserved: 1 });
   await pendingRef.set({
     order: { items: item(productId) },
-    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() - 60000))
+    expiresAt: Timestamp.fromDate(new Date(Date.now() - 60000))
   });
 
   await firestore.runTransaction(async tx => {
@@ -188,5 +189,5 @@ test('corrupt stock counters fail safely instead of allowing a reservation', asy
 });
 
 test.after(async () => {
-  await admin.app().delete();
+  await Promise.all(getApps().map(app => app.delete()));
 });
