@@ -742,6 +742,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
     // La clave y la reserva se registran en una sola transacción. Los reintentos
     // concurrentes no pueden reservar unidades ni crear preferencias duplicadas.
     await firestore.runTransaction(async transaction => {
+      needsAdminReview = false;
       const idempotencySnap = await transaction.get(idempotency.ref);
       if (idempotencySnap.exists) {
         const previous = idempotencySnap.data();
