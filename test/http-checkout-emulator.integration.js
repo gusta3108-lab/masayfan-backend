@@ -194,16 +194,23 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       },
       body: webhookBody
     });
-    assert.equal(mismatchedAmount.status, 500);
+    assert.equal(mismatchedAmount.status, 200, 'un pago aprobado inconsistente queda registrado para revisión, sin reintentos infinitos');
     assert.equal(globalThis.__masayMockPaymentFetches, 1);
-    assert.equal(
-      (await firestore.collection('pagos_pendientes').doc(body.external_reference).get()).exists,
-      true,
-      'un importe incorrecto no debe cerrar la orden pendiente'
-    );
+    const pendingAfterMismatch = await firestore.collection('pagos_pendientes').doc(body.external_reference).get();
+    assert.equal(pendingAfterMismatch.exists, true, 'un importe incorrecto no debe cerrar la orden pendiente');
+    assert.equal(pendingAfterMismatch.data().paymentApprovedNeedsReview, true);
+    const validationIncidentId = body.external_reference + '_987654321';
+    const validationIncident = await firestore.collection('incidencias_pagos').doc(validationIncidentId).get();
+    assert.equal(validationIncident.exists, true, 'el pago aprobado con importe incorrecto debe quedar visible para administración');
+    assert.equal(validationIncident.data().status, 'needs_admin_review');
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
     assert.equal(product.stockReserved, 1);
+
+    // El cleanup no puede liberar una reserva cuyo pago aprobado está en revisión.
+    const { releasePendingInventory } = require('../lib/inventory').createInventoryService({ getFirestore: () => firestore });
+    assert.equal(await releasePendingInventory(firestore.collection('pagos_pendientes').doc(body.external_reference)), false);
+    assert.equal((await firestore.collection('productos').doc(productId).get()).data().stockReserved, 1);
 
     globalThis.__masayMockPayment.transaction_amount = 100;
     const webhook = await fetch(webhookUrl, {
@@ -245,6 +252,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     );
     assert.equal(duplicate.status, 200);
     assert.equal(globalThis.__masayMockPaymentFetches, 3, 'cada webhook consulta el pago una sola vez');
+    assert.equal((await firestore.collection('incidencias_pagos').doc(validationIncidentId).get()).exists, false, 'la incidencia se cierra cuando el pago se valida y registra correctamente');
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 3);
     assert.equal(product.stockReserved, 0);
