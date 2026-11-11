@@ -26,6 +26,7 @@ process.env.FIREBASE_SERVICE_ACCOUNT_JSON = JSON.stringify({
 });
 process.env.MP_ACCESS_TOKEN = 'TEST-ONLY-NOT-A-REAL-MERCADO-PAGO-TOKEN';
 process.env.MP_WEBHOOK_SECRET = 'local-emulator-webhook-secret';
+process.env.INVENTORY_CLEANUP_SECRET = 'local-emulator-cleanup-secret';
 
 globalThis.__masayMockPreference = null;
 globalThis.__masayMockPayment = null;
@@ -63,7 +64,7 @@ require.cache[mpPath] = {
 };
 
 const app = require('../server');
-const { getFirestore } = require('firebase-admin/firestore');
+const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 const firestore = getFirestore();
 const { randomUUID } = crypto;
 
@@ -82,6 +83,12 @@ let baseUrl;
 let idToken;
 let userUid;
 const productId = 'http-checkout-' + randomUUID();
+const raceProductId = 'http-race-' + randomUUID();
+const cleanupProductId = 'http-cleanup-' + randomUUID();
+const expiredPendingId = 'http-expired-' + randomUUID();
+const futurePendingId = 'http-future-' + randomUUID();
+let raceOrderId = null;
+let raceExternalReference = null;
 
 test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producción', async t => {
   await new Promise(resolve => {
@@ -250,8 +257,128 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(product.stockReserved, 0);
   });
 
+  await t.test('dos checkouts HTTP simultáneos (efectivo y Mercado Pago) no venden dos veces la última unidad', async () => {
+    await firestore.collection('productos').doc(raceProductId).set({
+      name: 'Producto de concurrencia HTTP',
+      price: 100,
+      activo: true,
+      stockManaged: true,
+      stockQuantity: 1,
+      stockReserved: 0
+    });
+    const raceItems = [{ id: raceProductId, qty: 1, price: 100, options: '' }];
+    const [cashResponse, mpResponse] = await Promise.all([
+      fetch(baseUrl + '/api/pedidos/efectivo', {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': randomUUID() },
+        body: JSON.stringify({ items: raceItems, order })
+      }),
+      fetch(baseUrl + '/api/crear-preferencia', {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': randomUUID() },
+        body: JSON.stringify({ items: raceItems, order })
+      })
+    ]);
+    const [cashBody, mpBody] = await Promise.all([cashResponse.json(), mpResponse.json()]);
+    const outcomes = [
+      { status: cashResponse.status, body: cashBody, method: 'efectivo' },
+      { status: mpResponse.status, body: mpBody, method: 'mercadopago' }
+    ];
+    const winners = outcomes.filter(result => result.status === 201 || result.status === 200);
+    const rejected = outcomes.filter(result => result.status === 409);
+
+    assert.equal(winners.length, 1, JSON.stringify(outcomes));
+    assert.equal(rejected.length, 1, JSON.stringify(outcomes));
+    assert.equal(rejected[0].body.code, 'STOCK_INSUFFICIENT');
+    if (winners[0].method === 'efectivo') {
+      raceOrderId = winners[0].body.order_id;
+      const product = (await firestore.collection('productos').doc(raceProductId).get()).data();
+      assert.equal(product.stockQuantity, 0);
+      assert.equal(product.stockReserved, 0);
+    } else {
+      raceExternalReference = winners[0].body.external_reference;
+      assert.ok(raceExternalReference);
+      const product = (await firestore.collection('productos').doc(raceProductId).get()).data();
+      assert.equal(product.stockQuantity, 1);
+      assert.equal(product.stockReserved, 1);
+      assert.equal(
+        (await firestore.collection('pagos_pendientes').doc(raceExternalReference).get()).exists,
+        true
+      );
+    }
+  });
+
+  await t.test('el endpoint protegido libera solo reservas vencidas y la repetición no vuelve a descontar', async () => {
+    const productRef = firestore.collection('productos').doc(cleanupProductId);
+    const expiredRef = firestore.collection('pagos_pendientes').doc(expiredPendingId);
+    const futureRef = firestore.collection('pagos_pendientes').doc(futurePendingId);
+    const expiredAt = Timestamp.fromDate(new Date(Date.now() - 60000));
+    const futureAt = Timestamp.fromDate(new Date(Date.now() + 60000));
+    await productRef.set({
+      name: 'Producto de limpieza HTTP',
+      stockManaged: true,
+      stockQuantity: 4,
+      stockReserved: 2
+    });
+    await expiredRef.set({
+      order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
+      inventoryReleased: false,
+      expiresAt: expiredAt
+    });
+    await futureRef.set({
+      order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
+      inventoryReleased: false,
+      expiresAt: futureAt
+    });
+
+    const endpoint = baseUrl + '/api/internal/release-expired-inventory';
+    const unauthorized = await fetch(endpoint, { method: 'POST' });
+    assert.equal(unauthorized.status, 401);
+    assert.equal((await productRef.get()).data().stockReserved, 2);
+
+    const headersWithCleanupSecret = { 'x-inventory-cleanup-secret': process.env.INVENTORY_CLEANUP_SECRET };
+    const firstRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
+    const firstBody = await firstRun.json();
+    assert.equal(firstRun.status, 200, JSON.stringify(firstBody));
+    assert.equal(firstBody.success, true);
+    assert.equal(firstBody.released, 1);
+    assert.equal(firstBody.failed, 0);
+    assert.equal(firstBody.checked, 1);
+
+    let product = (await productRef.get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 1);
+    const expired = (await expiredRef.get()).data();
+    assert.equal(expired.inventoryReleased, true);
+    assert.equal(expired.expiresAt, undefined);
+    assert.equal(expired.reservationExpiresAt.toMillis(), expiredAt.toMillis());
+    const future = (await futureRef.get()).data();
+    assert.equal(future.inventoryReleased, false);
+    assert.equal(future.expiresAt.toMillis(), futureAt.toMillis());
+
+    const secondRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
+    const secondBody = await secondRun.json();
+    assert.equal(secondRun.status, 200, JSON.stringify(secondBody));
+    assert.equal(secondBody.success, true);
+    assert.equal(secondBody.released, 0);
+    assert.equal(secondBody.failed, 0);
+    assert.equal(secondBody.checked, 0);
+    product = (await productRef.get()).data();
+    assert.equal(product.stockReserved, 1);
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
+    await firestore.collection('productos').doc(raceProductId).delete();
+    await firestore.collection('productos').doc(cleanupProductId).delete();
+    await firestore.collection('pagos_pendientes').doc(expiredPendingId).delete();
+    await firestore.collection('pagos_pendientes').doc(futurePendingId).delete();
+    if (raceExternalReference) {
+      await firestore.collection('pagos_pendientes').doc(raceExternalReference).delete();
+    }
+    if (raceOrderId) {
+      await firestore.collection('pedidos').doc(raceOrderId).delete();
+    }
     await new Promise(resolve => server.close(resolve));
   });
 });
