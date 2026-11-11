@@ -222,6 +222,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       }
     );
     assert.equal(duplicate.status, 200);
+    assert.equal(globalThis.__masayMockPaymentFetches, 2, 'cada webhook consulta el pago una sola vez');
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 3);
     assert.equal(product.stockReserved, 0);
