@@ -34,5 +34,6 @@ jobs:
       - name: Run unit tests
         run: npm test
       - name: Run Firestore inventory integration tests
-        run: printf '%s' '{"emulators":{"auth":{"port":9099},"firestore":{"port":8080},"ui":{"enabled":false}}}' > firebase.json
-        npx --yes firebase-tools@14.22.0 emulators:exec --only firestore,auth --project masayfantasias "node --test test/http-checkout-emulator.integration.js && node --test test/inventory-emulator.integration.js"
+        run: |
+          printf '%s' '{"emulators":{"auth":{"port":9099},"firestore":{"port":8080},"ui":{"enabled":false}}}' > firebase.json
+          npx --yes firebase-tools@14.22.0 emulators:exec --only firestore,auth --project masayfantasias "node --test test/http-checkout-emulator.integration.js && node --test test/inventory-emulator.integration.js"
