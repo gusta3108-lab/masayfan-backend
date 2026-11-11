@@ -601,9 +601,9 @@ app.post('/api/crear-preferencia', async (req, res) => {
           expiration_date_from: reservationStart.toISOString(),
           expiration_date_to: reservationEnd.toISOString(),
           back_urls: {
-            success: 'https://www.masivfantasias.com/?mp_return=1',
-            failure: 'https://www.masivfantasias.com/?mp_return=1',
-            pending: 'https://www.masivfantasias.com/?mp_return=1'
+            success: 'https://masayfantasias.com/?mp_return=1',
+            failure: 'https://masayfantasias.com/?mp_return=1',
+            pending: 'https://masayfantasias.com/?mp_return=1'
           },
           notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
           auto_return: 'approved'
