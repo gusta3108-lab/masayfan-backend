@@ -355,35 +355,88 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
     return { verified: false, reason: 'La cuenta asociada al pago no coincide con el pedido.' };
   }
 
-  await firestore.runTransaction(async transaction => {
-    const [freshPending, existingOrder] = await Promise.all([
-      transaction.get(pendingRef),
-      transaction.get(orderRef)
-    ]);
-    if (existingOrder.exists) {
-      if (String(existingOrder.data().paymentId) !== String(paymentId)) {
-        throw new Error('La referencia ya fue utilizada por otro pago.');
+  try {
+    await firestore.runTransaction(async transaction => {
+      const [freshPending, existingOrder] = await Promise.all([
+        transaction.get(pendingRef),
+        transaction.get(orderRef)
+      ]);
+      if (existingOrder.exists) {
+        if (String(existingOrder.data().paymentId) !== String(paymentId)) {
+          throw new Error('La referencia ya fue utilizada por otro pago.');
+        }
+        return;
       }
-      return;
-    }
-    if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
-    const data = freshPending.data();
-    await completeInventorySale(transaction, data.order.items, data.inventoryReleased !== true);
-    transaction.set(orderRef, {
-      ...data.order,
-      userEmail: data.userEmail,
-      uid: data.uid,
-      status: 'nuevo',
-      paymentMethod: 'mercadopago',
-      paymentId: String(paymentId),
-      paymentStatus: 'approved',
-      inventoryCommitted: true,
-      createdAt: new Date().toISOString()
+      if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
+      const data = freshPending.data();
+      await completeInventorySale(transaction, data.order.items, data.inventoryReleased !== true);
+      transaction.set(orderRef, {
+        ...data.order,
+        userEmail: data.userEmail,
+        uid: data.uid,
+        status: 'nuevo',
+        paymentMethod: 'mercadopago',
+        paymentId: String(paymentId),
+        paymentStatus: 'approved',
+        inventoryCommitted: true,
+        createdAt: new Date().toISOString()
+      });
+      transaction.delete(pendingRef);
     });
-    transaction.delete(pendingRef);
-  });
-
-  return { verified: true, alreadyRegistered: false };
+    return { verified: true, alreadyRegistered: false };
+  } catch (registrationError) {
+    // El pago ya fue validado directamente con Mercado Pago. Si la reserva venció
+    // y otro cliente consumió el stock, registrar una incidencia durable en vez
+    // de dejar el webhook reintentando sin que administración pueda verla.
+    if (!String(registrationError.message || '').startsWith('STOCK_INSUFFICIENT:')) {
+      throw registrationError;
+    }
+    const incidentRef = firestore.collection('incidencias_pagos').doc(reference);
+    await firestore.runTransaction(async transaction => {
+      const [freshPending, existingOrder, incidentSnap] = await Promise.all([
+        transaction.get(pendingRef),
+        transaction.get(orderRef),
+        transaction.get(incidentRef)
+      ]);
+      if (existingOrder.exists) {
+        if (String(existingOrder.data().paymentId) !== String(paymentId)) {
+          throw new Error('La referencia ya fue utilizada por otro pago.');
+        }
+        return;
+      }
+      if (incidentSnap.exists) {
+        if (String(incidentSnap.data().paymentId) !== String(paymentId)) {
+          throw new Error('La incidencia ya está asociada a otro pago.');
+        }
+        return;
+      }
+      if (!freshPending.exists) throw new Error('No se encontró el pedido pendiente para registrar la incidencia.');
+      const data = freshPending.data();
+      transaction.create(incidentRef, {
+        type: 'approved_payment_stock_unavailable',
+        status: 'needs_admin_review',
+        externalReference: reference,
+        paymentId: String(paymentId),
+        paymentStatus: 'approved',
+        total: data.total,
+        currency: 'ARS',
+        uid: data.uid,
+        userEmail: data.userEmail,
+        order: data.order,
+        stockError: registrationError.message,
+        reservationReleased: data.inventoryReleased === true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      transaction.update(pendingRef, {
+        paymentApprovedNeedsReview: true,
+        paymentApprovedAt: admin.firestore.FieldValue.serverTimestamp(),
+        paymentId: String(paymentId),
+        paymentIncidentId: reference
+      });
+    });
+    return { verified: true, alreadyRegistered: false, needsAdminReview: true };
+  }
 }
 
 app.post('/api/internal/release-expired-inventory', async (req, res) => {
