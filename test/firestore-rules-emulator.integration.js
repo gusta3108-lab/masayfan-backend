@@ -15,8 +15,9 @@ async function createUser() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email, password: 'EmulatorPass123!', returnSecureToken: true })
   });
-  assert.equal(response.status, 200, await response.text());
-  return response.json();
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  return JSON.parse(responseText);
 }
 
 async function seed(path, fields) {
