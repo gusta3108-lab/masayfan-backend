@@ -81,6 +81,12 @@ async function authenticatedAdmin(req) {
   return user;
 }
 
+async function requireCustomerAccount(user) {
+  const adminSnap = await firestore.collection('administradores').doc(user.email).get();
+  if (adminSnap.exists) throw new Error('ADMIN_CANNOT_PURCHASE');
+  return user;
+}
+
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
 function checkoutIdempotency(req, user, items, order, paymentMethod) {
@@ -553,6 +559,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
+    await requireCustomerAccount(user);
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
@@ -613,6 +620,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error registrando pedido en efectivo:', error.message);
+    if (error.message === 'ADMIN_CANNOT_PURCHASE') return res.status(403).json({ success: false, error: 'Las cuentas administradoras no pueden realizar compras.' });
     if (error.message === 'IDEMPOTENCY_KEY_INVALID') return res.status(400).json({ success: false, error: 'La clave del intento de compra no es válida.' });
     if (error.message === 'IDEMPOTENCY_KEY_REUSED') return res.status(409).json({ success: false, error: 'Este intento de compra ya fue utilizado con otros datos. Volvé a confirmar el pedido.' });
     if (error.message === 'IDEMPOTENCY_PROCESSING') return res.status(409).json({ success: false, error: 'El pedido ya se está registrando. Esperá unos segundos y revisá tus pedidos.' });
@@ -628,6 +636,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
   try {
     if (!requireServices(res)) return;
     const user = await authenticatedUser(req);
+    await requireCustomerAccount(user);
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
@@ -795,6 +804,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error creando preferencia:', error.message);
+    if (error.message === 'ADMIN_CANNOT_PURCHASE') return res.status(403).json({ success: false, error: 'Las cuentas administradoras no pueden realizar compras.' });
     if (error.message === 'IDEMPOTENCY_KEY_INVALID') return res.status(400).json({ success: false, error: 'La clave del intento de compra no es válida.' });
     if (error.message === 'IDEMPOTENCY_KEY_REUSED') return res.status(409).json({ success: false, error: 'Este intento de compra ya fue utilizado con otros datos. Volvé a confirmar el pedido.' });
     if (error.message === 'IDEMPOTENCY_PROCESSING') return res.status(409).json({ success: false, error: 'El pago ya se está preparando. Esperá unos segundos antes de volver a intentar.' });
