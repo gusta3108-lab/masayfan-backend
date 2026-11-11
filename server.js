@@ -123,9 +123,10 @@ async function releasePendingInventory(pendingRef) {
     const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
     requirements.forEach((item, index) => {
       const snap = snapshots[index];
-      if (!snap.exists || snap.data().stockManaged !== true) return;
+      if (!snap.exists) return;
       const reserved = Number(snap.data().stockReserved || 0);
-      transaction.update(refs[index], { stockReserved: Math.max(0, reserved - item.qty) });
+      // Liberar también reservas de productos cuyo control se desactivó después del checkout.
+      if (reserved > 0) transaction.update(refs[index], { stockReserved: Math.max(0, reserved - item.qty) });
     });
     transaction.update(pendingRef, { inventoryReleased: true, inventoryReleasedAt: admin.firestore.FieldValue.serverTimestamp() });
     return true;
@@ -140,9 +141,10 @@ async function completeInventorySale(transaction, items, hasReservation = false)
     const snap = snapshots[index];
     if (!snap.exists) throw new Error('El producto asociado al pedido ya no existe.');
     const product = snap.data();
-    if (product.stockManaged !== true) return;
     const quantity = Number(product.stockQuantity || 0);
     const reserved = Number(product.stockReserved || 0);
+    // Una reserva existente debe consumirse aunque el control se haya desactivado después.
+    if (product.stockManaged !== true && !(hasReservation && reserved > 0)) return;
     if (hasReservation && reserved < item.qty) throw new Error('La reserva de inventario no coincide con el pedido.');
     if (!hasReservation && quantity - reserved < item.qty) {
       throw new Error('STOCK_INSUFFICIENT:' + String(product.name || product.nombre || 'Producto') + ':' + Math.max(0, quantity - reserved));
@@ -435,8 +437,10 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
         const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
         requirements.forEach((item, index) => {
           const snap = snapshots[index];
-          if (!snap.exists || snap.data().stockManaged !== true) return;
-          const quantity = Number(snap.data().stockQuantity || 0);
+          if (!snap.exists) return;
+          const product = snap.data();
+          if (product.stockManaged !== true && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
+          const quantity = Number(product.stockQuantity || 0);
           transaction.update(refs[index], { stockQuantity: quantity + item.qty });
         });
         transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString() });
