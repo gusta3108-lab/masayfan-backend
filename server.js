@@ -15,7 +15,7 @@ const app = express();
 app.use(cors({
   origin: ['https://masayfantasias.com', 'https://www.masayfantasias.com'],
   methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key']
 }));
 app.use(express.json({ limit: '100kb' }));
 
