@@ -12,7 +12,7 @@ const {
 
 const app = express();
 app.use(cors({
-  origin: ['https://masayfantasias.com', 'https://www.masayfantasias.com', 'https://masivfantasias.com', 'https://www.masivfantasias.com'],
+  origin: ['https://masayfantasias.com', 'https://www.masayfantasias.com'],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -131,7 +131,11 @@ async function releasePendingInventory(pendingRef) {
     requirements.forEach((item, index) => {
       const snap = snapshots[index];
       if (!snap.exists) return;
-      const reserved = Number(snap.data().stockReserved ?? 0);
+      const product = snap.data();
+      // Los productos legacy sin stock administrado nunca reservaron unidades.
+      // No exigir ni descontar una reserva que no existió.
+      if (product.stockManaged !== true && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
+      const reserved = Number(product.stockReserved ?? 0);
       // Nunca reducir a cero silenciosamente: eso podría liberar unidades de otro pedido.
       if (!Number.isSafeInteger(reserved) || reserved < item.qty) {
         throw new Error('No coincide el inventario reservado para liberar el pago pendiente.');
@@ -158,14 +162,14 @@ async function completeInventorySale(transaction, items, hasReservation = false)
     const snap = snapshots[index];
     if (!snap.exists) throw new Error('El producto asociado al pedido ya no existe.');
     const product = snap.data();
+    // Los productos legacy sin inventario administrado no reservaron ni deben consumir stock.
+    if (product.stockManaged !== true && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
     const quantity = Number(product.stockQuantity ?? 0);
     const reserved = Number(product.stockReserved ?? 0);
     // La integridad del contador se valida antes de calcular disponibilidad o consumir reservas.
     if (hasReservation && (!Number.isSafeInteger(reserved) || reserved < item.qty)) {
       throw new Error('La reserva de inventario no coincide con el pedido.');
     }
-    if (product.stockManaged !== true && !hasReservation
-      && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
     if (!Number.isSafeInteger(quantity) || quantity < 0
       || !Number.isSafeInteger(reserved) || reserved < 0 || reserved > quantity) {
       throw new Error('El inventario del producto tiene cantidades inválidas. Revisalo desde administración.');
