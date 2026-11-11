@@ -91,3 +91,17 @@ test('fails closed when failed count is nonzero even if success is true', async 
     /informó fallas/
   );
 });
+
+test('reports capped pagination as incomplete even when no individual record failed', async () => {
+  await assert.rejects(
+    releaseExpiredInventory({
+      secret: 'test-secret',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => '{"success":false,"released":1000,"failed":0,"checked":1000,"truncated":true}'
+      })
+    }),
+    /límite de 1000 reservas/
+  );
+});
