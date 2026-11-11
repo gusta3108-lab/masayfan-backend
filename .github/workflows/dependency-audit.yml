@@ -1,0 +1,40 @@
+name: Dependency security audit
+
+on:
+  push:
+    branches:
+      - audit/dependency-report
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Resolve dependencies
+        run: npm install --ignore-scripts --no-fund
+      - name: Report dependency vulnerabilities
+        shell: bash
+        run: |
+          npm audit --json > /tmp/npm-audit.json || true
+          node <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync('/tmp/npm-audit.json', 'utf8'));
+          console.log('Vulnerability totals:', JSON.stringify(report.metadata?.vulnerabilities || {}));
+          for (const [name, item] of Object.entries(report.vulnerabilities || {})) {
+            console.log(JSON.stringify({
+              package: name,
+              severity: item.severity,
+              direct: item.isDirect,
+              range: item.range,
+              via: item.via.map(v => typeof v === 'string' ? v : {name:v.name,title:v.title,url:v.url,range:v.range}),
+              fixAvailable: item.fixAvailable
+            }));
+          }
+          NODE
