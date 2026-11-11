@@ -238,12 +238,70 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   const orderRef = firestore.collection('pedidos').doc(reference);
   const pendingSnap = await pendingRef.get();
 
+  const validationIncidentRef = firestore.collection('incidencias_pagos')
+    .doc(reference + '_' + String(paymentId).replace(/[^A-Za-z0-9_-]/g, '_'));
+
+  async function recordApprovedPaymentValidationIncident(reason, pendingData = null) {
+    await firestore.runTransaction(async transaction => {
+      const [freshPending, existingOrder, incidentSnap] = await Promise.all([
+        transaction.get(pendingRef),
+        transaction.get(orderRef),
+        transaction.get(validationIncidentRef)
+      ]);
+      if (existingOrder.exists) {
+        if (String(existingOrder.data().paymentId) === String(paymentId)) return;
+        throw new Error('La referencia ya fue utilizada por otro pago.');
+      }
+      const data = freshPending.exists ? freshPending.data() : pendingData;
+      const incident = {
+        type: data ? 'approved_payment_validation_failed' : 'approved_payment_without_pending_order',
+        status: 'needs_admin_review',
+        externalReference: reference,
+        paymentId: String(paymentId),
+        paymentStatus: 'approved',
+        total: data?.total ?? null,
+        currency: String(payment.currency_id || ''),
+        receivedAmount: money(payment.transaction_amount || 0),
+        expectedPreferenceId: data?.preferenceId || null,
+        receivedPreferenceId: payment.preference_id ? String(payment.preference_id) : null,
+        uid: data?.uid || null,
+        userEmail: data?.userEmail || null,
+        order: data?.order || null,
+        reason,
+        updatedAt: FieldValue.serverTimestamp()
+      };
+      if (incidentSnap.exists) {
+        if (String(incidentSnap.data().paymentId) !== String(paymentId)) {
+          throw new Error('La incidencia ya está asociada a otro pago.');
+        }
+        transaction.set(validationIncidentRef, incident, { merge: true });
+      } else {
+        transaction.create(validationIncidentRef, {
+          ...incident,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      }
+      if (freshPending.exists) {
+        transaction.update(pendingRef, {
+          paymentApprovedNeedsReview: true,
+          paymentApprovedAt: FieldValue.serverTimestamp(),
+          paymentId: String(paymentId),
+          paymentIncidentId: validationIncidentRef.id
+        });
+      }
+    });
+    return { verified: false, needsAdminReview: true, reason };
+  }
+
   if (!pendingSnap.exists) {
     const existingOrder = await orderRef.get();
     if (existingOrder.exists
       && String(existingOrder.data().paymentId) === String(paymentId)
       && (!userUid || existingOrder.data().userEmail === (await firebaseAuth.getUser(userUid)).email)) {
       return { verified: true, alreadyRegistered: true };
+    }
+    if (payment.status === 'approved') {
+      return recordApprovedPaymentValidationIncident('No se encontró el pedido pendiente asociado al pago.');
     }
     return { verified: false, reason: 'No se encontró el pedido pendiente asociado al pago.' };
   }
@@ -253,21 +311,23 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   if (payment.status !== 'approved') {
     return { verified: false, status: payment.status || 'unknown' };
   }
+
+  let validationFailure = null;
   if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
-    return { verified: false, reason: 'El importe o la moneda del pago no coincide con el pedido.' };
+    validationFailure = 'El importe o la moneda del pago no coincide con el pedido.';
+  } else if (!pending.preferenceId || !payment.preference_id || String(payment.preference_id) !== String(pending.preferenceId)) {
+    validationFailure = 'La preferencia del pago no coincide con el pedido.';
+  } else if (payment.metadata?.user_uid && String(payment.metadata.user_uid) !== String(pending.uid)) {
+    validationFailure = 'La cuenta asociada al pago no coincide con el pedido.';
   }
-  if (!pending.preferenceId || !payment.preference_id || String(payment.preference_id) !== String(pending.preferenceId)) {
-    return { verified: false, reason: 'La preferencia del pago no coincide con el pedido.' };
-  }
-  if (payment.metadata?.user_uid && String(payment.metadata.user_uid) !== String(pending.uid)) {
-    return { verified: false, reason: 'La cuenta asociada al pago no coincide con el pedido.' };
-  }
+  if (validationFailure) return recordApprovedPaymentValidationIncident(validationFailure, pending);
 
   try {
     await firestore.runTransaction(async transaction => {
-      const [freshPending, existingOrder] = await Promise.all([
+      const [freshPending, existingOrder, validationIncident] = await Promise.all([
         transaction.get(pendingRef),
-        transaction.get(orderRef)
+        transaction.get(orderRef),
+        transaction.get(validationIncidentRef)
       ]);
       if (existingOrder.exists) {
         if (String(existingOrder.data().paymentId) !== String(paymentId)) {
@@ -290,6 +350,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         createdAt: new Date().toISOString()
       });
       transaction.delete(pendingRef);
+      if (validationIncident.exists) transaction.delete(validationIncidentRef);
     });
     return { verified: true, alreadyRegistered: false };
   } catch (registrationError) {
@@ -911,6 +972,7 @@ app.post('/api/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
     const result = await registerApprovedPayment(paymentId, reference, null, payment);
+    if (result.needsAdminReview) return res.sendStatus(200);
     if (!result.verified) return res.status(500).json({ received: true, processed: false });
     return res.sendStatus(200);
   } catch (error) {
