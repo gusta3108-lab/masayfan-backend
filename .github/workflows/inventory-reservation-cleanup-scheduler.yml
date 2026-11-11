@@ -1,0 +1,42 @@
+name: Scheduled inventory reservation cleanup
+run-name: "Scheduled inventory cleanup (${{ github.event_name }})"
+
+on:
+  schedule:
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inventory-reservation-cleanup
+  cancel-in-progress: false
+
+jobs:
+  release-expired-reservations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record trigger
+        run: |
+          echo "Workflow event: $GITHUB_EVENT_NAME"
+          echo "Inventory reservation cleanup started. UTC: $(date -u +%FT%TZ)"
+
+      - name: Checkout backend with cleanup script
+        uses: actions/checkout@v4
+        with:
+          ref: fix/verified-mercadopago-payments
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Release expired inventory reservations
+        run: npm run cleanup:inventory
+        env:
+          INVENTORY_CLEANUP_SECRET: ${{ secrets.INVENTORY_CLEANUP_SECRET }}
