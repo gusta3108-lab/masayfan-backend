@@ -62,3 +62,32 @@ test('fails closed when the backend response is not valid JSON', async () => {
     /JSON inválida/
   );
 });
+
+
+test('fails closed when the backend omits its explicit success flag', async () => {
+  await assert.rejects(
+    releaseExpiredInventory({
+      secret: 'test-secret',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => '{"released":0,"failed":0,"checked":0}'
+      })
+    }),
+    /informó fallas/
+  );
+});
+
+test('fails closed when failed count is nonzero even if success is true', async () => {
+  await assert.rejects(
+    releaseExpiredInventory({
+      secret: 'test-secret',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => '{"success":true,"released":2,"failed":1,"checked":3}'
+      })
+    }),
+    /informó fallas/
+  );
+});
