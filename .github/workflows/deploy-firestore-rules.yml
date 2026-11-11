@@ -33,6 +33,7 @@ jobs:
           node -e "const c=require('./firebase.json'); if(c.firestore?.rules !== 'firestore.rules') process.exit(1)"
 
       - name: Authenticate to Google Cloud with GitHub OIDC
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
