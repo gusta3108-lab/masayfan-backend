@@ -82,11 +82,14 @@ let server;
 let baseUrl;
 let idToken;
 let userUid;
+let customerEmail = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const cleanupProductId = 'http-cleanup-' + randomUUID();
 const expiredPendingId = 'http-expired-' + randomUUID();
 const futurePendingId = 'http-future-' + randomUUID();
+const restoreProductId = 'http-restore-' + randomUUID();
+const refundOrderId = 'http-refund-order-' + randomUUID();
 let raceOrderId = null;
 let raceExternalReference = null;
 
@@ -97,6 +100,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   baseUrl = 'http://127.0.0.1:' + server.address().port;
 
   const email = 'checkout-' + randomUUID() + '@example.test';
+  customerEmail = email;
   const signup = await fetch(
     'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
       '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
@@ -367,10 +371,69 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(product.stockReserved, 1);
   });
 
+  await t.test('el rechazo de un pago Mercado Pago exige devolución y restaura stock una sola vez', async () => {
+    await firestore.collection('productos').doc(restoreProductId).set({
+      name: 'Producto para prueba de devolución',
+      stockManaged: true,
+      stockQuantity: 1,
+      stockReserved: 0
+    });
+    await firestore.collection('pedidos').doc(refundOrderId).set({
+      items: [{ stockProductId: restoreProductId, qty: 1 }],
+      status: 'nuevo',
+      paymentMethod: 'mercadopago',
+      paymentStatus: 'approved',
+      inventoryCommitted: true,
+      inventoryRestored: false
+    });
+    await firestore.collection('administradores').doc(customerEmail).set({ enabled: true });
+
+    const endpoint = baseUrl + '/api/admin/orders/' + refundOrderId + '/status';
+    const adminHeaders = { ...headers, 'content-type': 'application/json' };
+    const beforeRefund = await fetch(endpoint, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ status: 'rechazado' })
+    });
+    const beforeRefundBody = await beforeRefund.json();
+    assert.equal(beforeRefund.status, 409, JSON.stringify(beforeRefundBody));
+    assert.equal(
+      (await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity,
+      1,
+      'no se devuelve inventario antes de confirmar el reembolso'
+    );
+
+    await firestore.collection('pedidos').doc(refundOrderId).update({ paymentStatus: 'refunded' });
+    const attempts = await Promise.all([
+      fetch(endpoint, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'rechazado' }) }),
+      fetch(endpoint, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'rechazado' }) })
+    ]);
+    const bodies = await Promise.all(attempts.map(response => response.json()));
+    assert.ok(attempts.every(response => response.status === 200), JSON.stringify(bodies));
+
+    const product = (await firestore.collection('productos').doc(restoreProductId).get()).data();
+    const orderAfterReject = (await firestore.collection('pedidos').doc(refundOrderId).get()).data();
+    assert.equal(product.stockQuantity, 2);
+    assert.equal(product.stockReserved, 0);
+    assert.equal(orderAfterReject.status, 'rechazado');
+    assert.equal(orderAfterReject.inventoryRestored, true);
+
+    const repeated = await fetch(endpoint, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ status: 'rechazado' })
+    });
+    assert.equal(repeated.status, 200);
+    assert.equal((await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity, 2);
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
     await firestore.collection('productos').doc(cleanupProductId).delete();
+    await firestore.collection('productos').doc(restoreProductId).delete();
+    await firestore.collection('pedidos').doc(refundOrderId).delete();
+    if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
     await firestore.collection('pagos_pendientes').doc(expiredPendingId).delete();
     await firestore.collection('pagos_pendientes').doc(futurePendingId).delete();
     if (raceExternalReference) {
