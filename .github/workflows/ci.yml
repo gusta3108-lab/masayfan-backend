@@ -21,9 +21,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Set up Java for Firestore emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Install dependencies
         run: npm install --ignore-scripts
       - name: Check JavaScript syntax
-        run: node --check server.js && node --check lib/customer-account.js && node --check scripts/release-expired-inventory.js
-      - name: Run tests
+        run: node --check server.js && node --check lib/customer-account.js && node --check lib/inventory.js && node --check scripts/release-expired-inventory.js
+      - name: Run unit tests
         run: npm test
+      - name: Run Firestore inventory integration tests
+        run: npx --yes firebase-tools@14.22.0 emulators:exec --only firestore --project demo-masayfantasias "node --test test/inventory-emulator.integration.js"
