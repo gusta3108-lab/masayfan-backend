@@ -18,7 +18,7 @@ test('calls the protected endpoint with the configured secret', async () => {
     secret: 'test-secret',
     fetchImpl: async (url, options) => {
       request = { url, options };
-      return { ok: true, status: 200, text: async () => '{"success":true,"released":2,"checked":2}' };
+      return { ok: true, status: 200, text: async () => '{"success":true,"released":2,"failed":0,"checked":2}' };
     }
   });
 
@@ -26,6 +26,7 @@ test('calls the protected endpoint with the configured secret', async () => {
   assert.equal(request.options.method, 'POST');
   assert.equal(request.options.headers['x-inventory-cleanup-secret'], 'test-secret');
   assert.equal(result.status, 200);
+  assert.equal(result.result.released, 2);
 });
 
 test('fails the job when the backend returns a non-success status', async () => {
@@ -35,5 +36,29 @@ test('fails the job when the backend returns a non-success status', async () => 
       fetchImpl: async () => ({ ok: false, status: 401, text: async () => 'Unauthorized' })
     }),
     /HTTP 401/
+  );
+});
+
+test('fails the job when the backend reports partial cleanup failures with HTTP 200', async () => {
+  await assert.rejects(
+    releaseExpiredInventory({
+      secret: 'test-secret',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => '{"success":false,"released":1,"failed":1,"checked":2}'
+      })
+    }),
+    /informó fallas/
+  );
+});
+
+test('fails closed when the backend response is not valid JSON', async () => {
+  await assert.rejects(
+    releaseExpiredInventory({
+      secret: 'test-secret',
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => 'ok' })
+    }),
+    /JSON inválida/
   );
 });
