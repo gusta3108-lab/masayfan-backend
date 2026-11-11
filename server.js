@@ -112,7 +112,7 @@ async function reserveInventory(transaction, items) {
   return requirements;
 }
 
-async function completeInventorySale(transaction, items, releaseReservation = false) {
+async function completeInventorySale(transaction, items, hasReservation = false) {
   const requirements = stockRequirements(items);
   const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
   const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
@@ -123,15 +123,13 @@ async function completeInventorySale(transaction, items, releaseReservation = fa
     if (product.stockManaged !== true) return;
     const quantity = Number(product.stockQuantity || 0);
     const reserved = Number(product.stockReserved || 0);
-    if (releaseReservation && reserved < item.qty) {
-      throw new Error('La reserva de inventario no coincide con el pedido.');
-    }
-    if (!releaseReservation && quantity - reserved < item.qty) {
+    if (hasReservation && reserved < item.qty) throw new Error('La reserva de inventario no coincide con el pedido.');
+    if (!hasReservation && quantity - reserved < item.qty) {
       throw new Error('STOCK_INSUFFICIENT:' + String(product.name || product.nombre || 'Producto') + ':' + Math.max(0, quantity - reserved));
     }
     transaction.update(refs[index], {
       stockQuantity: quantity - item.qty,
-      stockReserved: Math.max(0, reserved - (releaseReservation ? item.qty : item.qty))
+      stockReserved: hasReservation ? reserved - item.qty : reserved
     });
   });
   return requirements;
@@ -303,6 +301,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
     }
     if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
     const data = freshPending.data();
+    await completeInventorySale(transaction, data.order.items, true);
     transaction.set(orderRef, {
       ...data.order,
       userEmail: data.userEmail,
