@@ -69,6 +69,7 @@ require.cache[mpPath] = {
 };
 
 const app = require('../server');
+const { getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const firestore = getFirestore();
 const { randomUUID } = crypto;
@@ -216,5 +217,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await new Promise(resolve => server.close(resolve));
+    await Promise.all(getApps().map(app => app.delete()));
   });
 });
