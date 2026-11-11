@@ -27,6 +27,9 @@ async function releaseExpiredInventory({
   } catch (_error) {
     throw new Error('La limpieza de inventario devolvió una respuesta JSON inválida.');
   }
+  if (result.truncated === true) {
+    throw new Error('La limpieza alcanzó el límite de 1000 reservas por ejecución. Quedan registros por revisar y la próxima ejecución continuará el procesamiento.');
+  }
   if (result.success !== true || Number(result.failed || 0) > 0) {
     throw new Error('La limpieza de inventario informó fallas: ' + JSON.stringify(result).slice(0, 500));
   }
