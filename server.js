@@ -82,6 +82,19 @@ async function authenticatedAdmin(req) {
 }
 
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+
+function checkoutIdempotency(req, user, items, order, paymentMethod) {
+  const suppliedKey = req.get('Idempotency-Key');
+  const key = suppliedKey || crypto.randomUUID(); // Compatibilidad con clientes antiguos.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key)) {
+    throw new Error('IDEMPOTENCY_KEY_INVALID');
+  }
+  const documentId = crypto.createHash('sha256').update(user.uid + ':' + key).digest('hex');
+  const requestHash = crypto.createHash('sha256')
+    .update(JSON.stringify({ paymentMethod, items, order }))
+    .digest('hex');
+  return { ref: firestore.collection('checkout_requests').doc(documentId), requestHash };
+}
 const stockRequirements = items => {
   const totals = new Map();
   for (const item of items) {
@@ -558,13 +571,28 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     }
     const pricedItems = await priceCartItems(items);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
+    const orderData = { clientName, clientPhone, address, notes, items: pricedItems, total };
+    const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'efectivo');
     const orderRef = firestore.collection('pedidos').doc();
+    let finalOrderId = orderRef.id;
+    let replayed = false;
     await firestore.runTransaction(async transaction => {
+      const idempotencySnap = await transaction.get(idempotency.ref);
+      if (idempotencySnap.exists) {
+        const previous = idempotencySnap.data();
+        if (previous.requestHash !== idempotency.requestHash || previous.paymentMethod !== 'efectivo') {
+          throw new Error('IDEMPOTENCY_KEY_REUSED');
+        }
+        if (previous.status === 'completed' && previous.orderId) {
+          finalOrderId = previous.orderId;
+          replayed = true;
+          return;
+        }
+        if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
+      }
       await completeInventorySale(transaction, pricedItems, false);
       transaction.create(orderRef, {
-        clientName, clientPhone, address, notes,
-        items: pricedItems,
-        total,
+        ...orderData,
         uid: user.uid,
         userEmail: user.email,
         status: 'nuevo',
@@ -573,11 +601,22 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         inventoryCommitted: true,
         createdAt: new Date().toISOString()
       });
+      transaction.set(idempotency.ref, {
+        uid: user.uid,
+        paymentMethod: 'efectivo',
+        requestHash: idempotency.requestHash,
+        orderId: orderRef.id,
+        status: 'completed',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     });
-    return res.status(201).json({ success: true, order_id: orderRef.id });
+    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, replayed });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error registrando pedido en efectivo:', error.message);
+    if (error.message === 'IDEMPOTENCY_KEY_INVALID') return res.status(400).json({ success: false, error: 'La clave del intento de compra no es válida.' });
+    if (error.message === 'IDEMPOTENCY_KEY_REUSED') return res.status(409).json({ success: false, error: 'Este intento de compra ya fue utilizado con otros datos. Volvé a confirmar el pedido.' });
+    if (error.message === 'IDEMPOTENCY_PROCESSING') return res.status(409).json({ success: false, error: 'El pedido ya se está registrando. Esperá unos segundos y revisá tus pedidos.' });
     if (stockErrorResponse(error, res)) return;
     return res.status(authError ? 401 : 400).json({
       success: false,
@@ -607,34 +646,61 @@ app.post('/api/crear-preferencia', async (req, res) => {
 
     const pricedItems = await priceCartItems(items);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
+    const orderData = { clientName, clientPhone, address, notes, items: pricedItems, total };
+    const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'mercadopago');
     const externalReference = crypto.randomUUID();
-
     const preference = new Preference(mpClient);
     const reservationMinutes = 30;
     const reservationStart = new Date();
     const reservationEnd = new Date(reservationStart.getTime() + reservationMinutes * 60 * 1000);
-    const orderData = {
-      clientName, clientPhone, address, notes,
-      items: pricedItems,
-      total
-    };
     const pendingRef = firestore.collection('pagos_pendientes').doc(externalReference);
+    let replayedCheckout = null;
 
-    // Reservar el stock y crear el pendiente ANTES de crear la preferencia.
-    // Así nunca se entrega un link de pago sin una reserva persistida en Firestore.
+    // La clave y la reserva se registran en una sola transacción. Los reintentos
+    // concurrentes no pueden reservar unidades ni crear preferencias duplicadas.
     await firestore.runTransaction(async transaction => {
+      const idempotencySnap = await transaction.get(idempotency.ref);
+      if (idempotencySnap.exists) {
+        const previous = idempotencySnap.data();
+        if (previous.requestHash !== idempotency.requestHash || previous.paymentMethod !== 'mercadopago') {
+          throw new Error('IDEMPOTENCY_KEY_REUSED');
+        }
+        if (previous.status === 'completed' && previous.initPoint && previous.externalReference) {
+          replayedCheckout = previous;
+          return;
+        }
+        if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
+      }
       await reserveInventory(transaction, pricedItems);
       transaction.create(pendingRef, {
         uid: user.uid,
         userEmail: user.email,
         total,
         preferenceId: null,
+        initPoint: null,
         order: orderData,
         inventoryReleased: false,
         expiresAt: admin.firestore.Timestamp.fromDate(reservationEnd),
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       });
+      transaction.set(idempotency.ref, {
+        uid: user.uid,
+        paymentMethod: 'mercadopago',
+        requestHash: idempotency.requestHash,
+        externalReference,
+        status: 'processing',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     });
+
+    if (replayedCheckout) {
+      return res.json({
+        success: true,
+        init_point: replayedCheckout.initPoint,
+        external_reference: replayedCheckout.externalReference,
+        replayed: true
+      });
+    }
 
     try {
       const result = await preference.create({
@@ -663,9 +729,16 @@ app.post('/api/crear-preferencia', async (req, res) => {
       // El enlace solo se entrega después de persistir el ID de preferencia.
       await pendingRef.update({
         preferenceId: String(result.id),
+        initPoint: result.init_point,
         preferenceCreatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
-      return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString() });
+      await idempotency.ref.update({
+        status: 'completed',
+        initPoint: result.init_point,
+        preferenceId: String(result.id),
+        completedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString(), replayed: false });
     } catch (preferenceError) {
       // Si Mercado Pago falla, liberar la reserva para no inmovilizar unidades.
       try {
@@ -673,11 +746,22 @@ app.post('/api/crear-preferencia', async (req, res) => {
       } catch (cleanupError) {
         console.error('No se pudo liberar la reserva tras fallar la preferencia:', cleanupError.message);
       }
+      try {
+        await idempotency.ref.update({
+          status: 'failed',
+          failedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } catch (idempotencyError) {
+        console.error('No se pudo actualizar el estado del intento de checkout:', idempotencyError.message);
+      }
       throw preferenceError;
     }
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error creando preferencia:', error.message);
+    if (error.message === 'IDEMPOTENCY_KEY_INVALID') return res.status(400).json({ success: false, error: 'La clave del intento de compra no es válida.' });
+    if (error.message === 'IDEMPOTENCY_KEY_REUSED') return res.status(409).json({ success: false, error: 'Este intento de compra ya fue utilizado con otros datos. Volvé a confirmar el pedido.' });
+    if (error.message === 'IDEMPOTENCY_PROCESSING') return res.status(409).json({ success: false, error: 'El pago ya se está preparando. Esperá unos segundos antes de volver a intentar.' });
     if (stockErrorResponse(error, res)) return;
     res.status(authError ? 401 : 400).json({ success: false, error: authError ? 'La sesión expiró. Volvé a iniciar sesión.' : error.message });
   }
