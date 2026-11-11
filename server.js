@@ -130,7 +130,7 @@ async function releasePendingInventory(pendingRef) {
     const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
     requirements.forEach((item, index) => {
       const snap = snapshots[index];
-      if (!snap.exists) return;
+      if (!snap.exists) throw new Error('No se puede liberar la reserva: falta un producto asociado al pago pendiente.');
       const product = snap.data();
       // Los productos legacy sin stock administrado nunca reservaron unidades.
       // No exigir ni descontar una reserva que no existió.
@@ -465,10 +465,17 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
         const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
         requirements.forEach((item, index) => {
           const snap = snapshots[index];
-          if (!snap.exists) return;
+          if (!snap.exists) throw new Error('No se puede restaurar el inventario: falta un producto asociado al pedido.');
           const product = snap.data();
           if (product.stockManaged !== true && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
-          const quantity = Number(product.stockQuantity || 0);
+          const quantity = Number(product.stockQuantity ?? 0);
+          const reserved = Number(product.stockReserved ?? 0);
+          if (!Number.isSafeInteger(quantity) || quantity < 0
+            || !Number.isSafeInteger(reserved) || reserved < 0 || reserved > quantity
+            || !Number.isSafeInteger(item.qty) || item.qty < 1
+            || !Number.isSafeInteger(quantity + item.qty)) {
+            throw new Error('No se puede restaurar el inventario: las cantidades del producto son inválidas.');
+          }
           transaction.update(refs[index], { stockQuantity: quantity + item.qty });
         });
         transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString() });
