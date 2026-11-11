@@ -435,6 +435,9 @@ app.post('/api/crear-preferencia', async (req, res) => {
     const externalReference = crypto.randomUUID();
 
     const preference = new Preference(mpClient);
+    const reservationMinutes = 30;
+    const reservationStart = new Date();
+    const reservationEnd = new Date(reservationStart.getTime() + reservationMinutes * 60 * 1000);
     const result = await preference.create({
       body: {
         items: pricedItems.map(item => ({
@@ -446,6 +449,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
         payer: { email: user.email, name: clientName, phone: { number: clientPhone } },
         external_reference: externalReference,
         metadata: { external_reference: externalReference, user_uid: user.uid },
+        expiration_date_from: reservationStart.toISOString(),
+        expiration_date_to: reservationEnd.toISOString(),
         back_urls: {
           success: 'https://www.masivfantasias.com/?mp_return=1',
           failure: 'https://www.masivfantasias.com/?mp_return=1',
@@ -461,19 +466,25 @@ app.post('/api/crear-preferencia', async (req, res) => {
       items: pricedItems,
       total
     };
-    await firestore.collection('pagos_pendientes').doc(externalReference).create({
-      uid: user.uid,
-      userEmail: user.email,
-      total,
-      preferenceId: String(result.id),
-      order: orderData,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    const pendingRef = firestore.collection('pagos_pendientes').doc(externalReference);
+    await firestore.runTransaction(async transaction => {
+      await reserveInventory(transaction, pricedItems);
+      transaction.create(pendingRef, {
+        uid: user.uid,
+        userEmail: user.email,
+        total,
+        preferenceId: String(result.id),
+        order: orderData,
+        expiresAt: admin.firestore.Timestamp.fromDate(reservationEnd),
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     });
 
-    res.json({ success: true, init_point: result.init_point, external_reference: externalReference });
+    res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString() });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     console.error('Error creando preferencia:', error.message);
+    if (stockErrorResponse(error, res)) return;
     res.status(authError ? 401 : 400).json({ success: false, error: authError ? 'La sesión expiró. Volvé a iniciar sesión.' : error.message });
   }
 });
