@@ -1,6 +1,8 @@
 {
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "cleanup:inventory": "node scripts/release-expired-inventory.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.6",
