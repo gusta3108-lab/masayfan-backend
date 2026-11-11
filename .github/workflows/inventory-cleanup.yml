@@ -1,8 +1,10 @@
 name: Inventory reservation cleanup
+run-name: "Inventory cleanup (${{ github.event_name }})"
 
 on:
   schedule:
-    - cron: "2-59/5 * * * *"
+    # Every five minutes, offset from the top of the hour to reduce scheduler contention.
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Record trigger
+        run: |
+          echo "Workflow event: $GITHUB_EVENT_NAME"
+          echo "Scheduled/manual inventory reservation cleanup started. UTC: $(date -u +%FT%TZ)"
+
       - name: Checkout backend with cleanup script
         uses: actions/checkout@v4
         with:
