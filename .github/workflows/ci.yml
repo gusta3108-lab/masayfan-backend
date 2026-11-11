@@ -5,9 +5,11 @@ on:
     branches:
       - main
       - fix/verified-mercadopago-payments
+      - deploy/inventory-live
   pull_request:
     branches:
       - main
+      - fix/verified-mercadopago-payments
 
 jobs:
   validate:
@@ -22,4 +24,6 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
       - name: Check JavaScript syntax
-        run: node --check server.js
+        run: node --check server.js && node --check scripts/release-expired-inventory.js
+      - name: Run tests
+        run: npm test
