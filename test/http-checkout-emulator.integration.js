@@ -150,7 +150,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(savedOrder.exists, true);
     assert.equal(savedOrder.data().paymentMethod, 'efectivo');
     assert.equal(savedOrder.data().uid, userUid);
-    const product = (await firestore.collection('productos').doc(productId).get()).data();
+    let product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
     assert.equal(product.stockReserved, 0);
 
