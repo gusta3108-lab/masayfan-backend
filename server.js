@@ -885,21 +885,53 @@ app.post('/api/crear-preferencia', async (req, res) => {
       });
       return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString(), replayed: false });
     } catch (preferenceError) {
-      // Si Mercado Pago falla, liberar la reserva para no inmovilizar unidades.
+      // Un timeout o error de red no demuestra que Mercado Pago no haya creado
+      // la preferencia. Conservar la reserva y bloquear reintentos ciegos evita
+      // cobrar dos veces o vender las mismas unidades a otro cliente.
       try {
-        await releasePendingInventory(pendingRef);
-      } catch (cleanupError) {
-        console.error('No se pudo liberar la reserva tras fallar la preferencia:', cleanupError.message);
-      }
-      try {
-        await idempotency.ref.update({
-          status: 'failed',
-          failedAt: admin.firestore.FieldValue.serverTimestamp()
+        const incidentRef = firestore.collection('incidencias_checkout').doc(idempotency.ref.id);
+        await firestore.runTransaction(async transaction => {
+          const [freshPending, existingIncident] = await Promise.all([
+            transaction.get(pendingRef),
+            transaction.get(incidentRef)
+          ]);
+          if (freshPending.exists) {
+            transaction.update(pendingRef, {
+              preferenceCreationNeedsReview: true,
+              preferenceCreationError: String(preferenceError.message || 'Error desconocido').slice(0, 500),
+              preferenceCreationFailedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+          if (!existingIncident.exists) {
+            transaction.create(incidentRef, {
+              type: 'mercadopago_preference_creation_ambiguous',
+              status: 'needs_admin_review',
+              uid: user.uid,
+              userEmail: user.email,
+              externalReference,
+              checkoutRequestId: idempotency.ref.id,
+              total,
+              currency: 'ARS',
+              stockReservationExpiresAt: reservationEnd.toISOString(),
+              error: String(preferenceError.message || 'Error desconocido').slice(0, 500),
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+          transaction.set(idempotency.ref, {
+            status: 'needs_review',
+            needsReviewAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
         });
-      } catch (idempotencyError) {
-        console.error('No se pudo actualizar el estado del intento de checkout:', idempotencyError.message);
+      } catch (reviewError) {
+        // Si Firestore tampoco responde, dejar el estado processing. El control
+        // de intentos antiguos lo convertirá en revisión sin liberar stock.
+        console.error('No se pudo registrar la incidencia del checkout:', reviewError.message);
       }
-      throw preferenceError;
+      return res.status(409).json({
+        success: false,
+        code: 'CHECKOUT_NEEDS_REVIEW',
+        error: 'No pudimos confirmar si Mercado Pago creó el intento. No vuelvas a pagar ni generes otro pedido hasta que administración lo revise.'
+      });
     }
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
