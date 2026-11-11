@@ -13,7 +13,8 @@ async function releaseExpiredInventory({
   const response = await fetchImpl(endpoint, {
     method: 'POST',
     headers: { 'x-inventory-cleanup-secret': secret },
-    signal: AbortSignal.timeout(20000)
+    // Render Free may need about one minute to wake from idle; allow extra time.
+    signal: AbortSignal.timeout(90000)
   });
   const body = await response.text();
   if (!response.ok) {
