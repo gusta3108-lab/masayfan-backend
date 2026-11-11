@@ -692,6 +692,24 @@ app.post('/api/verificar-pago', async (req, res) => {
   }
 });
 
+async function updateReversedPayment(paymentId, reference, status) {
+  const orderRef = firestore.collection('pedidos').doc(reference);
+  return firestore.runTransaction(async transaction => {
+    const orderSnap = await transaction.get(orderRef);
+    if (!orderSnap.exists) return false;
+    const order = orderSnap.data();
+    // Solo actualizar el pedido si pertenece exactamente al pago consultado en Mercado Pago.
+    if (String(order.paymentId || '') !== String(paymentId)) return false;
+    if (['refunded', 'charged_back'].includes(String(order.paymentStatus || ''))) return true;
+    if (order.paymentStatus !== 'approved') return false;
+    transaction.update(orderRef, {
+      paymentStatus: status,
+      paymentStatusUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return true;
+  });
+}
+
 app.post('/api/webhook', async (req, res) => {
   try {
     if (!requireServices(res)) return;
@@ -707,8 +725,15 @@ app.post('/api/webhook', async (req, res) => {
     const reference = String(payment.external_reference || '');
     if (!reference) return res.sendStatus(200);
     if (payment.status !== 'approved') {
-      if (['cancelled', 'rejected', 'refunded', 'charged_back'].includes(String(payment.status))) {
+      const paymentStatus = String(payment.status || '');
+      if (['cancelled', 'rejected', 'refunded', 'charged_back'].includes(paymentStatus)) {
         await releasePendingInventory(firestore.collection('pagos_pendientes').doc(reference));
+      }
+      // Una devolución o contracargo posterior a la aprobación debe reflejarse
+      // en el pedido existente. No se repone stock automáticamente: el producto
+      // puede haber sido preparado o entregado y requiere decisión administrativa.
+      if (['refunded', 'charged_back'].includes(paymentStatus)) {
+        await updateReversedPayment(paymentId, reference, paymentStatus);
       }
       return res.sendStatus(200);
     }
