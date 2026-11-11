@@ -330,6 +330,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid) {
       paymentMethod: 'mercadopago',
       paymentId: String(paymentId),
       paymentStatus: 'approved',
+      inventoryCommitted: true,
       createdAt: new Date().toISOString()
     });
     transaction.delete(pendingRef);
@@ -348,11 +349,11 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
     const now = admin.firestore.Timestamp.now();
     const expired = await firestore.collection('pagos_pendientes')
       .where('expiresAt', '<=', now)
-      .where('inventoryReleased', '!=', true)
       .limit(100)
       .get();
     let released = 0;
     for (const pendingDoc of expired.docs) {
+      if (pendingDoc.data().inventoryReleased === true) continue;
       if (await releasePendingInventory(pendingDoc.ref)) released += 1;
     }
     return res.json({ success: true, released, checked: expired.size });
