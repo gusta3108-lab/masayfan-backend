@@ -81,6 +81,74 @@ async function authenticatedAdmin(req) {
 }
 
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+const stockRequirements = items => {
+  const totals = new Map();
+  for (const item of items) {
+    const productId = String(item.stockProductId || '');
+    if (!productId) continue;
+    totals.set(productId, (totals.get(productId) || 0) + Number(item.qty));
+  }
+  return [...totals.entries()].map(([productId, qty]) => ({ productId, qty }));
+};
+
+async function reserveInventory(transaction, items) {
+  const requirements = stockRequirements(items);
+  const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
+  const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
+  requirements.forEach((item, index) => {
+    const snap = snapshots[index];
+    if (!snap.exists) throw new Error('Uno de los productos ya no existe.');
+    const product = snap.data();
+    if (product.stockManaged !== true) return;
+    const quantity = Number(product.stockQuantity || 0);
+    const reserved = Number(product.stockReserved || 0);
+    const available = Math.max(0, quantity - reserved);
+    if (!Number.isInteger(item.qty) || item.qty > available) {
+      const productName = String(product.name || product.nombre || 'Producto');
+      throw new Error('STOCK_INSUFFICIENT:' + productName + ':' + available);
+    }
+    transaction.update(refs[index], { stockReserved: reserved + item.qty });
+  });
+  return requirements;
+}
+
+async function completeInventorySale(transaction, items, releaseReservation = false) {
+  const requirements = stockRequirements(items);
+  const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
+  const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
+  requirements.forEach((item, index) => {
+    const snap = snapshots[index];
+    if (!snap.exists) throw new Error('El producto asociado al pedido ya no existe.');
+    const product = snap.data();
+    if (product.stockManaged !== true) return;
+    const quantity = Number(product.stockQuantity || 0);
+    const reserved = Number(product.stockReserved || 0);
+    if (releaseReservation && reserved < item.qty) {
+      throw new Error('La reserva de inventario no coincide con el pedido.');
+    }
+    if (!releaseReservation && quantity - reserved < item.qty) {
+      throw new Error('STOCK_INSUFFICIENT:' + String(product.name || product.nombre || 'Producto') + ':' + Math.max(0, quantity - reserved));
+    }
+    transaction.update(refs[index], {
+      stockQuantity: quantity - item.qty,
+      stockReserved: Math.max(0, reserved - (releaseReservation ? item.qty : item.qty))
+    });
+  });
+  return requirements;
+}
+
+function stockErrorResponse(error, res) {
+  if (!String(error.message || '').startsWith('STOCK_INSUFFICIENT:')) return false;
+  const [, productName, available] = String(error.message).split(':');
+  res.status(409).json({
+    success: false,
+    code: 'STOCK_INSUFFICIENT',
+    error: 'Stock insuficiente de ' + productName + '. Solo quedan ' + available + ' unidades disponibles.',
+    available: Number(available)
+  });
+  return true;
+}
+
 
 async function priceCartItems(items) {
   if (!Array.isArray(items) || items.length < 1 || items.length > 30) {
@@ -123,11 +191,13 @@ async function priceCartItems(items) {
       name = String(banner.title || promoProductSnap.data().name || promoProductSnap.data().nombre || '').slice(0, 160);
       if (!(unitPrice > 0) || !name) throw new Error('Precio o nombre de promoción inválido.');
       itemId = 'promo_' + bannerSnap.id;
+      item.stockProductId = bannerSnap.data().productId;
     } else {
       if (!itemId || itemId.startsWith('banner_')) throw new Error('No se pudo identificar un producto del carrito.');
       const productSnap = await firestore.collection('productos').doc(itemId).get();
       if (!productSnap.exists) throw new Error('Uno de los productos ya no existe.');
       const product = productSnap.data();
+      item.stockProductId = itemId;
       if (product.activo === false) throw new Error('Uno de los productos no está disponible.');
       const basePrice = money(product.price ?? product.precio ?? 0);
       const discount = Number(product.discount || 0);
@@ -151,6 +221,7 @@ async function priceCartItems(items) {
     if (money(item.price) !== unitPrice) throw new Error('El precio de un producto cambió. Actualizá el carrito e intentá nuevamente.');
     pricedItems.push({
       id: itemId,
+      stockProductId: item.stockProductId || null,
       name,
       price: unitPrice,
       qty,
