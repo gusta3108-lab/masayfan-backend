@@ -31,6 +31,23 @@ test('two concurrent buyers cannot reserve the final unit', async () => {
   assert.equal(product.stockReserved, 1);
 });
 
+test('two concurrent unreserved sales cannot consume the same final unit', async () => {
+  const productId = unique('sale-race-product');
+  const productRef = firestore.collection('productos').doc(productId);
+  await productRef.set({ name: 'Producto de prueba', stockManaged: true, stockQuantity: 1, stockReserved: 0 });
+
+  const attempts = await Promise.allSettled([
+    firestore.runTransaction(tx => inventory.completeInventorySale(tx, item(productId), false)),
+    firestore.runTransaction(tx => inventory.completeInventorySale(tx, item(productId), false))
+  ]);
+
+  assert.equal(attempts.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(attempts.filter(result => result.status === 'rejected').length, 1);
+  const product = (await productRef.get()).data();
+  assert.equal(product.stockQuantity, 0);
+  assert.equal(product.stockReserved, 0);
+});
+
 test('concurrent cleanup attempts release one reservation exactly once', async () => {
   const productId = unique('release-product');
   const pendingId = unique('pending');
