@@ -22,7 +22,7 @@ jobs:
       - name: Record trigger
         run: |
           echo "Workflow event: $GITHUB_EVENT_NAME"
-          echo "Scheduled/manual inventory reservation cleanup started."
+          echo "Scheduled/manual inventory reservation cleanup started. UTC: $(date -u +%FT%TZ)"
 
       - name: Checkout backend with cleanup script
         uses: actions/checkout@v4
