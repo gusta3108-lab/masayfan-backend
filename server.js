@@ -725,6 +725,29 @@ app.get('/health', (_req, res) => {
   });
 });
 
+app.post('/api/admin/push-test', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const adminUser = await authenticatedAdmin(req);
+    if (!firebaseMessaging) {
+      return res.status(503).json({ success: false, error: 'Firebase Cloud Messaging no está disponible.' });
+    }
+    const result = await sendAdminOrderPushNotifications({
+      firestore,
+      messaging: firebaseMessaging,
+      orderId: 'push-test',
+      order: { pushTest: true },
+      onlyEmail: adminUser.email
+    });
+    return res.json({ success: true, ...result, message: 'Prueba de notificación enviada.' });
+  } catch (error) {
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para probar las alertas.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error enviando prueba de notificaciones:', error.message);
+    return res.status(503).json({ success: false, error: 'No se pudo enviar la prueba de notificaciones.' });
+  }
+});
+
 app.post('/api/admin/push-token', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
