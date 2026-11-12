@@ -338,7 +338,10 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
-      await completeInventorySale(transaction, data.order.items, data.inventoryReleased !== true);
+      // An expired reservation cannot be converted into a sale after payment.
+      // The payment must be reconciled separately; never consume unreserved stock.
+      if (data.inventoryReleased === true) throw new Error('RESERVATION_EXPIRED');
+      await completeInventorySale(transaction, data.order.items, true);
       transaction.set(orderRef, {
         ...data.order,
         userEmail: data.userEmail,
@@ -358,7 +361,8 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     // El pago ya fue validado directamente con Mercado Pago. Si la reserva venció
     // y otro cliente consumió el stock, registrar una incidencia durable en vez
     // de dejar el webhook reintentando sin que administración pueda verla.
-    if (!String(registrationError.message || '').startsWith('STOCK_INSUFFICIENT:')) {
+    if (!String(registrationError.message || '').startsWith('STOCK_INSUFFICIENT:')
+      && registrationError.message !== 'RESERVATION_EXPIRED') {
       throw registrationError;
     }
     const incidentRef = firestore.collection('incidencias_pagos').doc(reference);
@@ -452,6 +456,13 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
             externalReference: pendingDoc.id
           });
           if (payments.length === 0) {
+            const expiresAt = pendingDoc.data().expiresAt?.toDate
+              ? pendingDoc.data().expiresAt.toDate().getTime()
+              : new Date(pendingDoc.data().expiresAt).getTime();
+            const indexingGraceMs = 30 * 60 * 1000;
+            // Payment Search can lag. Keep stock for a grace period after the
+            // preference expires before treating an empty result as definitive.
+            if (!Number.isFinite(expiresAt) || Date.now() - expiresAt < indexingGraceMs) continue;
             if (await releasePendingInventory(pendingDoc.ref, { confirmedNotApproved: true })) released += 1;
             continue;
           }
