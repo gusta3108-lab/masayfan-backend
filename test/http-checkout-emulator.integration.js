@@ -533,6 +533,254 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal((await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity, 2);
   });
 
+  await t.test('un pedido de prueba recorre todas las etapas sin tocar inventario ni pagos', async () => {
+    const testOrderId = 'http-test-order-' + randomUUID();
+    const testProductId = 'http-test-product-' + randomUUID();
+    const orderRef = firestore.collection('pedidos').doc(testOrderId);
+    const productRef = firestore.collection('productos').doc(testProductId);
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const originalStock = 7;
+    await productRef.set({
+      name: 'Producto aislado para pedido ficticio',
+      stockManaged: true,
+      stockQuantity: originalStock,
+      stockReserved: 0
+    });
+    await orderRef.set({
+      esPrueba: true,
+      status: 'nuevo',
+      paymentMethod: 'prueba',
+      paymentStatus: 'not_applicable',
+      inventoryCommitted: false,
+      items: [{ stockProductId: testProductId, qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
+    });
+    await adminRef.set({ enabled: true });
+
+    try {
+      const endpoint = baseUrl + '/api/admin/orders/' + testOrderId + '/status';
+      const adminHeaders = { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' };
+      for (const status of ['preparacion', 'listo', 'finalizado']) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: adminHeaders,
+          body: JSON.stringify({ status })
+        });
+        const body = await response.json();
+        assert.equal(response.status, 200, JSON.stringify(body));
+        assert.equal(body.success, true);
+        const saved = (await orderRef.get()).data();
+        assert.equal(saved.status, status);
+        assert.equal(saved.testResolution, 'accepted');
+        assert.equal(saved.paymentStatus, 'not_applicable');
+        assert.equal(saved.inventoryCommitted, false);
+      }
+
+      const completed = (await orderRef.get()).data();
+      assert.ok(completed.testResolvedAt);
+      assert.ok(completed.testCompletedAt);
+      const product = (await productRef.get()).data();
+      assert.equal(product.stockQuantity, originalStock);
+      assert.equal(product.stockReserved, 0);
+
+      const invalid = await fetch(endpoint, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ status: 'preparacion' })
+      });
+      assert.equal(invalid.status, 409, 'un pedido de prueba finalizado no se puede reabrir');
+    } finally {
+      await adminRef.delete();
+      await orderRef.delete();
+      await productRef.delete();
+    }
+  });
+
+  await t.test('el administrador puede reintentar un pago aprobado tras liberar la reserva solo si hay stock disponible, sin duplicar el descuento', async () => {
+    const retryProductId = 'http-retry-' + randomUUID();
+    const retryReference = randomUUID();
+    const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
+    const retryIncidentId = retryReference;
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(retryIncidentId);
+    const originalPayment = globalThis.__masayMockPayment;
+    const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
+
+    await firestore.collection('productos').doc(retryProductId).set({
+      name: 'Producto de reintento administrativo',
+      stockManaged: true,
+      stockQuantity: 2,
+      stockReserved: 0
+    });
+    const pendingOrder = {
+      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto de reintento administrativo', price: 100 }],
+      total: 100,
+      clientName: 'Pedido de prueba de emulador'
+    };
+    await pendingRef.set({
+      uid: userUid,
+      userEmail: customerEmail,
+      total: 100,
+      preferenceId: 'pref-retry-emulator',
+      order: pendingOrder,
+      inventoryReleased: true
+    });
+    await incidentRef.set({
+      type: 'approved_payment_stock_unavailable',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: retryPaymentId,
+      externalReference: retryReference,
+      total: 100,
+      currency: 'ARS',
+      uid: userUid,
+      userEmail: customerEmail,
+      order: pendingOrder
+    });
+    await adminRef.set({ enabled: true });
+    globalThis.__masayMockPayment = {
+      id: retryPaymentId,
+      status: 'approved',
+      external_reference: retryReference,
+      currency_id: 'ARS',
+      transaction_amount: 100,
+      preference_id: 'pref-retry-emulator',
+      metadata: { user_uid: userUid }
+    };
+
+    try {
+      const endpoint = baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryIncidentId + '/retry-approved-payment';
+      const headers = { authorization: 'Bearer ' + idToken };
+      const attempts = await Promise.all([
+        fetch(endpoint, { method: 'POST', headers }),
+        fetch(endpoint, { method: 'POST', headers })
+      ]);
+      const bodies = await Promise.all(attempts.map(response => response.json()));
+      assert.ok(attempts.every(response => response.status === 200), JSON.stringify(bodies));
+      assert.ok(bodies.every(body => body.success), JSON.stringify(bodies));
+
+      const product = (await firestore.collection('productos').doc(retryProductId).get()).data();
+      assert.equal(product.stockQuantity, 1, 'dos reintentos concurrentes descuentan una sola unidad');
+      assert.equal(product.stockReserved, 0);
+      const savedOrder = await firestore.collection('pedidos').doc(retryReference).get();
+      assert.equal(savedOrder.exists, true);
+      assert.equal(savedOrder.data().paymentStatus, 'approved');
+      assert.equal(savedOrder.data().inventoryCommitted, true);
+      assert.equal((await pendingRef.get()).exists, false);
+      assert.equal((await incidentRef.get()).data().status, 'resolved');
+      assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore, 'reintentar no crea otra preferencia ni inicia otro cobro');
+    } finally {
+      globalThis.__masayMockPayment = originalPayment;
+      await adminRef.delete();
+      await pendingRef.delete();
+      await incidentRef.delete();
+      await firestore.collection('pedidos').doc(retryReference).delete();
+      await firestore.collection('productos').doc(retryProductId).delete();
+    }
+  });
+
+  await t.test('el reintento administrativo conserva la incidencia y el pedido pendiente si el stock sigue agotado', async () => {
+    const retryProductId = 'http-retry-empty-' + randomUUID();
+    const retryReference = randomUUID();
+    const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(retryReference);
+    const originalPayment = globalThis.__masayMockPayment;
+
+    await firestore.collection('productos').doc(retryProductId).set({
+      name: 'Producto agotado de prueba',
+      stockManaged: true,
+      stockQuantity: 0,
+      stockReserved: 0
+    });
+    const pendingOrder = {
+      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto agotado de prueba', price: 100 }],
+      total: 100
+    };
+    await pendingRef.set({
+      uid: userUid,
+      userEmail: customerEmail,
+      total: 100,
+      preferenceId: 'pref-retry-empty-emulator',
+      order: pendingOrder,
+      inventoryReleased: true
+    });
+    await incidentRef.set({
+      type: 'approved_payment_stock_unavailable',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: retryPaymentId,
+      externalReference: retryReference,
+      total: 100,
+      currency: 'ARS',
+      uid: userUid,
+      userEmail: customerEmail,
+      order: pendingOrder
+    });
+    await adminRef.set({ enabled: true });
+    globalThis.__masayMockPayment = {
+      id: retryPaymentId,
+      status: 'approved',
+      external_reference: retryReference,
+      currency_id: 'ARS',
+      transaction_amount: 100,
+      preference_id: 'pref-retry-empty-emulator',
+      metadata: { user_uid: userUid }
+    };
+
+    try {
+      const response = await fetch(
+        baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryReference + '/retry-approved-payment',
+        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+      );
+      const body = await response.json();
+      assert.equal(response.status, 409, JSON.stringify(body));
+      assert.equal(body.success, false);
+      assert.equal((await firestore.collection('productos').doc(retryProductId).get()).data().stockQuantity, 0);
+      assert.equal((await pendingRef.get()).exists, true);
+      assert.equal((await firestore.collection('pedidos').doc(retryReference).get()).exists, false);
+      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+    } finally {
+      globalThis.__masayMockPayment = originalPayment;
+      await adminRef.delete();
+      await pendingRef.delete();
+      await incidentRef.delete();
+      await firestore.collection('pedidos').doc(retryReference).delete();
+      await firestore.collection('productos').doc(retryProductId).delete();
+    }
+  });
+
+  await t.test('el endpoint de reintento rechaza incidencias ajenas a falta de stock antes de consultar el pago', async () => {
+    const incidentId = randomUUID();
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(incidentId);
+    const paymentFetchesBefore = globalThis.__masayMockPaymentFetches;
+    await adminRef.set({ enabled: true });
+    await incidentRef.set({
+      type: 'approved_payment_validation_failed',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: '123456789',
+      externalReference: incidentId
+    });
+    try {
+      const response = await fetch(
+        baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + incidentId + '/retry-approved-payment',
+        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+      );
+      const body = await response.json();
+      assert.equal(response.status, 409, JSON.stringify(body));
+      assert.equal(body.success, false);
+      assert.equal(globalThis.__masayMockPaymentFetches, paymentFetchesBefore,
+        'una incidencia de validación nunca debe disparar el flujo de reintento de stock');
+      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+    } finally {
+      await adminRef.delete();
+      await incidentRef.delete();
+    }
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();

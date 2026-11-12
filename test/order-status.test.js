@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canTransitionOrderStatus, canRejectOrder } = require('../lib/order-status');
+const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder, isTestOrder } = require('../lib/order-status');
 
 test('allows the normal order lifecycle', () => {
   assert.equal(canTransitionOrderStatus('nuevo', 'preparacion'), true);
@@ -46,4 +46,29 @@ test('requires a confirmed Mercado Pago refund before rejecting a paid order', (
   assert.equal(canRejectOrder({ paymentMethod: 'mercadopago', paymentStatus: 'refunded' }), true);
   assert.equal(canRejectOrder({ paymentMethod: 'efectivo', paymentStatus: 'pending' }), true);
   assert.equal(canRejectOrder({ paymentMethod: 'prueba', paymentStatus: 'not_applicable' }), true);
+});
+
+
+test('allows test orders to traverse preparation, ready and finalized without skipping stages', () => {
+  assert.equal(canTransitionTestOrderStatus('nuevo', 'preparacion'), true);
+  assert.equal(canTransitionTestOrderStatus('preparacion', 'listo'), true);
+  assert.equal(canTransitionTestOrderStatus('listo', 'finalizado'), true);
+  assert.equal(canTransitionTestOrderStatus('nuevo', 'rechazado'), true);
+  assert.equal(canTransitionTestOrderStatus('nuevo', 'listo'), false);
+  assert.equal(canTransitionTestOrderStatus('preparacion', 'finalizado'), false);
+  assert.equal(canTransitionTestOrderStatus('finalizado', 'rechazado'), false);
+  assert.equal(canTransitionTestOrderStatus('rechazado', 'nuevo'), false);
+});
+
+
+test('recognizes every supported audio test-order marker', () => {
+  assert.equal(isTestOrder({ esPrueba: true }), true);
+  assert.equal(isTestOrder({ testType: 'audio' }), true);
+  assert.equal(isTestOrder({ paymentMethod: 'prueba' }), true);
+  assert.equal(isTestOrder({ paymentMethod: 'mercadopago' }), false);
+});
+
+test('supports the legacy accepted test-order state without allowing stage skips', () => {
+  assert.equal(canTransitionTestOrderStatus('aceptado', 'listo'), true);
+  assert.equal(canTransitionTestOrderStatus('aceptado', 'finalizado'), false);
 });
