@@ -5,9 +5,12 @@ on:
     branches:
       - main
       - fix/verified-mercadopago-payments
+      - deploy/inventory-live
+      - test/current-inventory-emulator
   pull_request:
     branches:
       - main
+      - fix/verified-mercadopago-payments
 
 jobs:
   validate:
@@ -19,7 +22,20 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Set up Java for Firestore emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Install dependencies
         run: npm install --ignore-scripts
+      - name: Check dependency vulnerabilities
+        run: npm audit --audit-level=moderate
       - name: Check JavaScript syntax
-        run: node --check server.js
+        run: node --check server.js && node --check lib/customer-account.js && node --check lib/inventory.js && node --check scripts/release-expired-inventory.js && node --check test/firestore-rules-emulator.integration.js
+      - name: Run unit tests
+        run: npm test
+      - name: Run Firestore emulator integration and security tests
+        run: |
+          printf '%s' '{"firestore":{"rules":"firestore.rules"},"emulators":{"auth":{"port":9099},"firestore":{"port":8080},"ui":{"enabled":false}}}' > firebase.json
+          npx --yes firebase-tools@14.22.0 emulators:exec --only firestore,auth --project masayfantasias "node --test test/firestore-rules-emulator.integration.js && node --test test/http-checkout-emulator.integration.js && node --test test/inventory-emulator.integration.js"
