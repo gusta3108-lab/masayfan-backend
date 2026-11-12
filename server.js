@@ -1,6 +1,6 @@
 const express = require('express');
 const crypto = require('node:crypto');
-const { canTransitionOrderStatus, canRejectOrder } = require('./lib/order-status');
+const { canTransitionOrderStatus, canRejectOrder, canTransitionTestOrderStatus } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
 const cors = require('cors');
 const { initializeApp, cert } = require('firebase-admin/app');
@@ -666,6 +666,24 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
       const currentStatus = String(order.status || 'nuevo');
+      // Los pedidos de prueba no son ventas: sólo actualizan su propio estado y metadatos.
+      // Nunca reservan/devuelven stock ni modifican pagos o contabilidad.
+      if (order.esPrueba === true) {
+        if (!canTransitionTestOrderStatus(currentStatus, newStatus)) {
+          throw new Error('INVALID_TEST_ORDER_TRANSITION');
+        }
+        if (currentStatus === newStatus) return;
+        const stageTimestamp = new Date().toISOString();
+        const testUpdate = {
+          status: newStatus,
+          testResolution: order.testResolution || (newStatus === 'rechazado' ? 'rejected' : 'accepted'),
+          testStageUpdatedAt: stageTimestamp
+        };
+        if (currentStatus === 'nuevo') testUpdate.testResolvedAt = stageTimestamp;
+        if (newStatus === 'finalizado') testUpdate.testCompletedAt = stageTimestamp;
+        transaction.update(orderRef, testUpdate);
+        return;
+      }
       if (!canTransitionOrderStatus(currentStatus, newStatus)) {
         throw new Error('INVALID_STATUS_TRANSITION');
       }
@@ -701,6 +719,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
     return res.json({ success: true, order_id: orderId, status: newStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'INVALID_TEST_ORDER_TRANSITION') return res.status(409).json({ success: false, error: 'La prueba ya fue resuelta o el estado solicitado no es válido.' });
     if (error.message === 'INVALID_STATUS_TRANSITION') return res.status(409).json({ success: false, error: 'Ese cambio de estado no está permitido. Los pedidos entregados o rechazados no se pueden reabrir ni rechazar nuevamente.' });
     if (error.message === 'PAYMENT_REFUND_REQUIRED') return res.status(409).json({ success: false, error: 'Este pedido fue cobrado con Mercado Pago. Primero realizá la devolución desde Mercado Pago y esperá que el pedido muestre DEVUELTO; recién entonces podrás rechazarlo y devolver el stock. Si figura CONTRACARGO, requiere revisión manual.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para modificar pedidos.' });
