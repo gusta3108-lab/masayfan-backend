@@ -1,0 +1,802 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+
+if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_AUTH_EMULATOR_HOST) {
+  throw new Error('Estas pruebas requieren Firestore y Auth Emulator; se bloquea cualquier conexión a producción.');
+}
+
+// La app valida el project_id, pero los emuladores aceptan esta identidad local
+// sin credenciales reales. Ninguna clave ni token de producción se utiliza.
+const { privateKey } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' }
+});
+process.env.FIREBASE_SERVICE_ACCOUNT_JSON = JSON.stringify({
+  type: 'service_account',
+  project_id: 'masayfantasias',
+  private_key_id: 'local-emulator-only',
+  private_key: privateKey,
+  client_email: 'masay-emulator@masayfantasias.iam.gserviceaccount.com',
+  client_id: '1',
+  token_uri: 'https://oauth2.googleapis.com/token'
+});
+process.env.MP_ACCESS_TOKEN = 'TEST-ONLY-NOT-A-REAL-MERCADO-PAGO-TOKEN';
+process.env.MP_WEBHOOK_SECRET = 'local-emulator-webhook-secret';
+process.env.INVENTORY_CLEANUP_SECRET = 'local-emulator-cleanup-secret';
+
+globalThis.__masayMockPreference = null;
+globalThis.__masayMockPreferenceCalls = 0;
+globalThis.__masayMockPayment = null;
+globalThis.__masayMockPaymentFetches = 0;
+
+class MercadoPagoConfig {
+  constructor() {}
+}
+class Preference {
+  async create({ body }) {
+    globalThis.__masayMockPreferenceCalls += 1;
+    globalThis.__masayMockPreference = body;
+    return { id: 'pref-emulator-001', init_point: 'https://sandbox.invalid/checkout/emulator' };
+  }
+}
+class Payment {
+  async get() {
+    globalThis.__masayMockPaymentFetches += 1;
+    if (!globalThis.__masayMockPayment) throw new Error('No se configuró el pago simulado.');
+    return globalThis.__masayMockPayment;
+  }
+}
+const realMercadoPago = require('mercadopago');
+const mpPath = require.resolve('mercadopago');
+require.cache[mpPath] = {
+  id: mpPath,
+  filename: mpPath,
+  loaded: true,
+  exports: {
+    MercadoPagoConfig,
+    Preference,
+    Payment,
+    WebhookSignatureValidator: realMercadoPago.WebhookSignatureValidator,
+    InvalidWebhookSignatureError: realMercadoPago.InvalidWebhookSignatureError
+  }
+};
+
+const app = require('../server');
+const { getFirestore, Timestamp } = require('firebase-admin/firestore');
+const firestore = getFirestore();
+const { randomUUID } = crypto;
+
+function signedWebhookHeaders(dataId, requestId, secret) {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`;
+  const signature = crypto.createHmac('sha256', secret).update(manifest).digest('hex');
+  return {
+    'x-signature': `ts=${ts},v1=${signature}`,
+    'x-request-id': requestId
+  };
+}
+
+let server;
+let baseUrl;
+let idToken;
+let userUid;
+let customerEmail = null;
+const productId = 'http-checkout-' + randomUUID();
+const raceProductId = 'http-race-' + randomUUID();
+const noStockProductId = 'http-no-stock-' + randomUUID();
+const cleanupProductId = 'http-cleanup-' + randomUUID();
+const expiredPendingId = 'http-expired-' + randomUUID();
+const futurePendingId = 'http-future-' + randomUUID();
+const restoreProductId = 'http-restore-' + randomUUID();
+const refundOrderId = 'http-refund-order-' + randomUUID();
+let raceOrderId = null;
+let raceExternalReference = null;
+
+test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producción', async t => {
+  await new Promise(resolve => {
+    server = app.listen(0, '127.0.0.1', resolve);
+  });
+  baseUrl = 'http://127.0.0.1:' + server.address().port;
+
+  const email = 'checkout-' + randomUUID() + '@example.test';
+  customerEmail = email;
+  const signup = await fetch(
+    'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
+      '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password: 'EmulatorPass123!', returnSecureToken: true })
+    }
+  );
+  assert.equal(signup.status, 200, 'Auth Emulator debe crear el usuario de prueba');
+  const authData = await signup.json();
+  idToken = authData.idToken;
+  userUid = authData.localId;
+
+  await firestore.collection('productos').doc(productId).set({
+    name: 'Producto HTTP de prueba',
+    price: 100,
+    activo: true,
+    stockManaged: true,
+    stockQuantity: 5,
+    stockReserved: 0
+  });
+
+  const headers = {
+    authorization: 'Bearer ' + idToken,
+    'content-type': 'application/json'
+  };
+  const order = {
+    clientName: 'Cliente de prueba',
+    clientPhone: '1111111111',
+    address: 'Dirección de prueba',
+    notes: 'Solo emulador'
+  };
+  const items = [{ id: productId, qty: 1, price: 100, options: '' }];
+
+  await t.test('el checkout en efectivo crea el pedido y descuenta stock', async () => {
+    const key = randomUUID();
+    const response = await fetch(baseUrl + '/api/pedidos/efectivo', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ items, order })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 201, JSON.stringify(body));
+    assert.equal(body.success, true);
+    const savedOrder = await firestore.collection('pedidos').doc(body.order_id).get();
+    assert.equal(savedOrder.exists, true);
+    assert.equal(savedOrder.data().paymentMethod, 'efectivo');
+    assert.equal(savedOrder.data().uid, userUid);
+    let product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 0);
+
+    const replay = await fetch(baseUrl + '/api/pedidos/efectivo', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ items, order })
+    });
+    const replayBody = await replay.json();
+    assert.equal(replay.status, 200, JSON.stringify(replayBody));
+    assert.equal(replayBody.replayed, true);
+    assert.equal(replayBody.order_id, body.order_id);
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4, 'repetir el checkout en efectivo no debe descontar stock otra vez');
+
+    const crossMethodReuse = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ items, order })
+    });
+    const crossMethodBody = await crossMethodReuse.json();
+    assert.equal(crossMethodReuse.status, 409, JSON.stringify(crossMethodBody));
+    assert.match(crossMethodBody.error, /intento de compra ya fue utilizado/i);
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 0, 'reutilizar la clave entre métodos no debe reservar stock');
+  });
+
+  await t.test('sin stock no se genera preferencia ni se registra un pago pendiente', async () => {
+    await firestore.collection('productos').doc(noStockProductId).set({
+      name: 'Producto agotado de prueba',
+      price: 100,
+      activo: true,
+      stockManaged: true,
+      stockQuantity: 0,
+      stockReserved: 0
+    });
+    const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
+    const response = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({
+        items: [{ id: noStockProductId, qty: 1, price: 100, options: '' }],
+        order
+      })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 409, JSON.stringify(body));
+    assert.equal(body.code, 'STOCK_INSUFFICIENT');
+    assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore,
+      'Mercado Pago no debe recibir una solicitud de pago si no hay stock');
+    assert.equal(
+      (await firestore.collection('pagos_pendientes').get()).docs
+        .some(doc => doc.data().order?.items?.some(item => item.stockProductId === noStockProductId)),
+      false,
+      'no debe quedar una orden de pago pendiente para el producto agotado'
+    );
+    const product = (await firestore.collection('productos').doc(noStockProductId).get()).data();
+    assert.equal(product.stockQuantity, 0);
+    assert.equal(product.stockReserved, 0);
+  });
+
+  await t.test('Mercado Pago reserva stock y el webhook simulado confirma una sola venta', async () => {
+    const mpIdempotencyKey = randomUUID();
+    const response = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': mpIdempotencyKey },
+      body: JSON.stringify({ items, order })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.success, true);
+    assert.equal(body.init_point, 'https://sandbox.invalid/checkout/emulator');
+    assert.equal(globalThis.__masayMockPreference.external_reference, body.external_reference);
+
+    const replay = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': mpIdempotencyKey },
+      body: JSON.stringify({ items, order })
+    });
+    const replayBody = await replay.json();
+    assert.equal(replay.status, 200, JSON.stringify(replayBody));
+    assert.equal(replayBody.replayed, true);
+    assert.equal(replayBody.external_reference, body.external_reference);
+    assert.equal(replayBody.init_point, body.init_point);
+
+    let product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 1, 'repetir Mercado Pago no debe duplicar la reserva');
+
+    globalThis.__masayMockPayment = {
+      id: '987654321',
+      status: 'approved',
+      external_reference: body.external_reference,
+      currency_id: 'ARS',
+      transaction_amount: 100,
+      preference_id: 'pref-emulator-001',
+      metadata: { user_uid: userUid }
+    };
+
+    const webhookUrl = baseUrl + '/api/webhook?type=payment&data.id=987654321';
+    const webhookBody = JSON.stringify({ type: 'payment', data: { id: '987654321' } });
+    const invalidSignature = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-signature': `ts=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}`,
+        'x-request-id': 'emulator-invalid-signature'
+      },
+      body: webhookBody
+    });
+    assert.equal(invalidSignature.status, 401);
+    assert.equal(globalThis.__masayMockPaymentFetches, 0, 'una firma inválida no debe consultar ni procesar el pago');
+
+    // Una firma válida no basta: el importe debe coincidir con la orden pendiente.
+    globalThis.__masayMockPayment.transaction_amount = 99;
+    const mismatchedAmount = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedWebhookHeaders('987654321', 'emulator-wrong-amount', process.env.MP_WEBHOOK_SECRET)
+      },
+      body: webhookBody
+    });
+    assert.equal(mismatchedAmount.status, 200, 'un pago aprobado inconsistente queda registrado para revisión, sin reintentos infinitos');
+    assert.equal(globalThis.__masayMockPaymentFetches, 1);
+    const pendingAfterMismatch = await firestore.collection('pagos_pendientes').doc(body.external_reference).get();
+    assert.equal(pendingAfterMismatch.exists, true, 'un importe incorrecto no debe cerrar la orden pendiente');
+    assert.equal(pendingAfterMismatch.data().paymentApprovedNeedsReview, true);
+    const validationIncidentId = body.external_reference + '_987654321';
+    const validationIncident = await firestore.collection('incidencias_pagos').doc(validationIncidentId).get();
+    assert.equal(validationIncident.exists, true, 'el pago aprobado con importe incorrecto debe quedar visible para administración');
+    assert.equal(validationIncident.data().status, 'needs_admin_review');
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 1);
+
+    // El cleanup no puede liberar una reserva cuyo pago aprobado está en revisión.
+    const { releasePendingInventory } = require('../lib/inventory').createInventoryService({ getFirestore: () => firestore });
+    assert.equal(await releasePendingInventory(firestore.collection('pagos_pendientes').doc(body.external_reference)), false);
+    assert.equal((await firestore.collection('productos').doc(productId).get()).data().stockReserved, 1);
+
+    globalThis.__masayMockPayment.transaction_amount = 100;
+    const webhook = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedWebhookHeaders('987654321', 'emulator-request-1', process.env.MP_WEBHOOK_SECRET)
+      },
+      body: webhookBody
+    });
+    assert.equal(webhook.status, 200);
+    assert.equal(globalThis.__masayMockPaymentFetches, 2);
+
+    const savedOrder = await firestore.collection('pedidos').doc(body.external_reference).get();
+    assert.equal(savedOrder.exists, true);
+    assert.equal(savedOrder.data().paymentMethod, 'mercadopago');
+    assert.equal(savedOrder.data().paymentStatus, 'approved');
+    assert.equal(savedOrder.data().paymentId, '987654321');
+    assert.equal(
+      (await firestore.collection('pagos_pendientes').doc(body.external_reference).get()).exists,
+      false
+    );
+
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 3);
+    assert.equal(product.stockReserved, 0);
+
+    // Repetir el webhook no debe crear otro pedido ni volver a descontar stock.
+    const duplicate = await fetch(
+      webhookUrl,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signedWebhookHeaders('987654321', 'emulator-request-2', process.env.MP_WEBHOOK_SECRET)
+        },
+        body: JSON.stringify({ type: 'payment', data: { id: '987654321' } })
+      }
+    );
+    assert.equal(duplicate.status, 200);
+    assert.equal(globalThis.__masayMockPaymentFetches, 3, 'cada webhook consulta el pago una sola vez');
+    assert.equal((await firestore.collection('incidencias_pagos').doc(validationIncidentId).get()).exists, false, 'la incidencia se cierra cuando el pago se valida y registra correctamente');
+    product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 3);
+    assert.equal(product.stockReserved, 0);
+  });
+
+  await t.test('dos checkouts HTTP simultáneos (efectivo y Mercado Pago) no venden dos veces la última unidad', async () => {
+    await firestore.collection('productos').doc(raceProductId).set({
+      name: 'Producto de concurrencia HTTP',
+      price: 100,
+      activo: true,
+      stockManaged: true,
+      stockQuantity: 1,
+      stockReserved: 0
+    });
+    const raceItems = [{ id: raceProductId, qty: 1, price: 100, options: '' }];
+    const [cashResponse, mpResponse] = await Promise.all([
+      fetch(baseUrl + '/api/pedidos/efectivo', {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': randomUUID() },
+        body: JSON.stringify({ items: raceItems, order })
+      }),
+      fetch(baseUrl + '/api/crear-preferencia', {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': randomUUID() },
+        body: JSON.stringify({ items: raceItems, order })
+      })
+    ]);
+    const [cashBody, mpBody] = await Promise.all([cashResponse.json(), mpResponse.json()]);
+    const outcomes = [
+      { status: cashResponse.status, body: cashBody, method: 'efectivo' },
+      { status: mpResponse.status, body: mpBody, method: 'mercadopago' }
+    ];
+    const winners = outcomes.filter(result => result.status === 201 || result.status === 200);
+    const rejected = outcomes.filter(result => result.status === 409);
+
+    assert.equal(winners.length, 1, JSON.stringify(outcomes));
+    assert.equal(rejected.length, 1, JSON.stringify(outcomes));
+    assert.equal(rejected[0].body.code, 'STOCK_INSUFFICIENT');
+    if (winners[0].method === 'efectivo') {
+      raceOrderId = winners[0].body.order_id;
+      const product = (await firestore.collection('productos').doc(raceProductId).get()).data();
+      assert.equal(product.stockQuantity, 0);
+      assert.equal(product.stockReserved, 0);
+    } else {
+      raceExternalReference = winners[0].body.external_reference;
+      assert.ok(raceExternalReference);
+      const product = (await firestore.collection('productos').doc(raceProductId).get()).data();
+      assert.equal(product.stockQuantity, 1);
+      assert.equal(product.stockReserved, 1);
+      assert.equal(
+        (await firestore.collection('pagos_pendientes').doc(raceExternalReference).get()).exists,
+        true
+      );
+    }
+  });
+
+  await t.test('el endpoint protegido libera solo reservas vencidas y la repetición no vuelve a descontar', async () => {
+    const productRef = firestore.collection('productos').doc(cleanupProductId);
+    const expiredRef = firestore.collection('pagos_pendientes').doc(expiredPendingId);
+    const futureRef = firestore.collection('pagos_pendientes').doc(futurePendingId);
+    const expiredAt = Timestamp.fromDate(new Date(Date.now() - 31 * 60 * 1000));
+    const futureAt = Timestamp.fromDate(new Date(Date.now() + 60000));
+    await productRef.set({
+      name: 'Producto de limpieza HTTP',
+      stockManaged: true,
+      stockQuantity: 4,
+      stockReserved: 2
+    });
+    await expiredRef.set({
+      order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
+      inventoryReleased: false,
+      preferenceId: 'pref-expired-emulator',
+      expiresAt: expiredAt
+    });
+    await futureRef.set({
+      order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
+      inventoryReleased: false,
+      expiresAt: futureAt
+    });
+
+    const endpoint = baseUrl + '/api/internal/release-expired-inventory';
+    const unauthorized = await fetch(endpoint, { method: 'POST' });
+    assert.equal(unauthorized.status, 401);
+    assert.equal((await productRef.get()).data().stockReserved, 2);
+
+    const headersWithCleanupSecret = { 'x-inventory-cleanup-secret': process.env.INVENTORY_CLEANUP_SECRET };
+    // Mock only the Mercado Pago payment-search endpoint. The local HTTP server
+    // and Firebase emulators continue using their real local fetch connections.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, options) => {
+      const url = new URL(input instanceof URL ? input.href : (typeof input === 'string' ? input : input.url));
+      if (url.origin === 'https://api.mercadopago.com'
+        && url.pathname === '/v1/payments/search') {
+        return new Response(JSON.stringify({ paging: { total: 0 }, results: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      return originalFetch(input, options);
+    };
+    let firstRun;
+    let firstBody;
+    try {
+      firstRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
+      firstBody = await firstRun.json();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(firstRun.status, 200, JSON.stringify(firstBody));
+    assert.equal(firstBody.success, true);
+    assert.equal(firstBody.released, 1);
+    assert.equal(firstBody.failed, 0);
+    assert.equal(firstBody.checked, 1);
+    assert.equal(firstBody.truncated, false);
+
+    let product = (await productRef.get()).data();
+    assert.equal(product.stockQuantity, 4);
+    assert.equal(product.stockReserved, 1);
+    const expired = (await expiredRef.get()).data();
+    assert.equal(expired.inventoryReleased, true);
+    assert.equal(expired.expiresAt, undefined);
+    assert.equal(expired.reservationExpiresAt.toMillis(), expiredAt.toMillis());
+    const future = (await futureRef.get()).data();
+    assert.equal(future.inventoryReleased, false);
+    assert.equal(future.expiresAt.toMillis(), futureAt.toMillis());
+
+    const secondRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
+    const secondBody = await secondRun.json();
+    assert.equal(secondRun.status, 200, JSON.stringify(secondBody));
+    assert.equal(secondBody.success, true);
+    assert.equal(secondBody.released, 0);
+    assert.equal(secondBody.failed, 0);
+    assert.equal(secondBody.checked, 0);
+    assert.equal(secondBody.truncated, false);
+    product = (await productRef.get()).data();
+    assert.equal(product.stockReserved, 1);
+
+  });
+
+  await t.test('el rechazo de un pago Mercado Pago exige devolución y restaura stock una sola vez', async () => {
+    await firestore.collection('productos').doc(restoreProductId).set({
+      name: 'Producto para prueba de devolución',
+      stockManaged: true,
+      stockQuantity: 1,
+      stockReserved: 0
+    });
+    await firestore.collection('pedidos').doc(refundOrderId).set({
+      items: [{ stockProductId: restoreProductId, qty: 1 }],
+      status: 'nuevo',
+      paymentMethod: 'mercadopago',
+      paymentStatus: 'approved',
+      inventoryCommitted: true,
+      inventoryRestored: false
+    });
+    await firestore.collection('administradores').doc(customerEmail).set({ enabled: true });
+
+    const endpoint = baseUrl + '/api/admin/orders/' + refundOrderId + '/status';
+    const adminHeaders = { ...headers, 'content-type': 'application/json' };
+    const beforeRefund = await fetch(endpoint, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ status: 'rechazado' })
+    });
+    const beforeRefundBody = await beforeRefund.json();
+    assert.equal(beforeRefund.status, 409, JSON.stringify(beforeRefundBody));
+    assert.equal(
+      (await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity,
+      1,
+      'no se devuelve inventario antes de confirmar el reembolso'
+    );
+
+    await firestore.collection('pedidos').doc(refundOrderId).update({ paymentStatus: 'refunded' });
+    const attempts = await Promise.all([
+      fetch(endpoint, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'rechazado' }) }),
+      fetch(endpoint, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'rechazado' }) })
+    ]);
+    const bodies = await Promise.all(attempts.map(response => response.json()));
+    assert.ok(attempts.every(response => response.status === 200), JSON.stringify(bodies));
+
+    const product = (await firestore.collection('productos').doc(restoreProductId).get()).data();
+    const orderAfterReject = (await firestore.collection('pedidos').doc(refundOrderId).get()).data();
+    assert.equal(product.stockQuantity, 2);
+    assert.equal(product.stockReserved, 0);
+    assert.equal(orderAfterReject.status, 'rechazado');
+    assert.equal(orderAfterReject.inventoryRestored, true);
+
+    const repeated = await fetch(endpoint, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ status: 'rechazado' })
+    });
+    assert.equal(repeated.status, 200);
+    assert.equal((await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity, 2);
+  });
+
+  await t.test('un pedido de prueba recorre todas las etapas sin tocar inventario ni pagos', async () => {
+    const testOrderId = 'http-test-order-' + randomUUID();
+    const testProductId = 'http-test-product-' + randomUUID();
+    const orderRef = firestore.collection('pedidos').doc(testOrderId);
+    const productRef = firestore.collection('productos').doc(testProductId);
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const originalStock = 7;
+    await productRef.set({
+      name: 'Producto aislado para pedido ficticio',
+      stockManaged: true,
+      stockQuantity: originalStock,
+      stockReserved: 0
+    });
+    await orderRef.set({
+      esPrueba: true,
+      status: 'nuevo',
+      paymentMethod: 'prueba',
+      paymentStatus: 'not_applicable',
+      inventoryCommitted: false,
+      items: [{ stockProductId: testProductId, qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
+    });
+    await adminRef.set({ enabled: true });
+
+    try {
+      const endpoint = baseUrl + '/api/admin/orders/' + testOrderId + '/status';
+      const adminHeaders = { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' };
+      for (const status of ['preparacion', 'listo', 'finalizado']) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: adminHeaders,
+          body: JSON.stringify({ status })
+        });
+        const body = await response.json();
+        assert.equal(response.status, 200, JSON.stringify(body));
+        assert.equal(body.success, true);
+        const saved = (await orderRef.get()).data();
+        assert.equal(saved.status, status);
+        assert.equal(saved.testResolution, 'accepted');
+        assert.equal(saved.paymentStatus, 'not_applicable');
+        assert.equal(saved.inventoryCommitted, false);
+      }
+
+      const completed = (await orderRef.get()).data();
+      assert.ok(completed.testResolvedAt);
+      assert.ok(completed.testCompletedAt);
+      const product = (await productRef.get()).data();
+      assert.equal(product.stockQuantity, originalStock);
+      assert.equal(product.stockReserved, 0);
+
+      const invalid = await fetch(endpoint, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ status: 'preparacion' })
+      });
+      assert.equal(invalid.status, 409, 'un pedido de prueba finalizado no se puede reabrir');
+    } finally {
+      await adminRef.delete();
+      await orderRef.delete();
+      await productRef.delete();
+    }
+  });
+
+  await t.test('el administrador puede reintentar un pago aprobado tras liberar la reserva solo si hay stock disponible, sin duplicar el descuento', async () => {
+    const retryProductId = 'http-retry-' + randomUUID();
+    const retryReference = randomUUID();
+    const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
+    const retryIncidentId = retryReference;
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(retryIncidentId);
+    const originalPayment = globalThis.__masayMockPayment;
+    const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
+
+    await firestore.collection('productos').doc(retryProductId).set({
+      name: 'Producto de reintento administrativo',
+      stockManaged: true,
+      stockQuantity: 2,
+      stockReserved: 0
+    });
+    const pendingOrder = {
+      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto de reintento administrativo', price: 100 }],
+      total: 100,
+      clientName: 'Pedido de prueba de emulador'
+    };
+    await pendingRef.set({
+      uid: userUid,
+      userEmail: customerEmail,
+      total: 100,
+      preferenceId: 'pref-retry-emulator',
+      order: pendingOrder,
+      inventoryReleased: true
+    });
+    await incidentRef.set({
+      type: 'approved_payment_stock_unavailable',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: retryPaymentId,
+      externalReference: retryReference,
+      total: 100,
+      currency: 'ARS',
+      uid: userUid,
+      userEmail: customerEmail,
+      order: pendingOrder
+    });
+    await adminRef.set({ enabled: true });
+    globalThis.__masayMockPayment = {
+      id: retryPaymentId,
+      status: 'approved',
+      external_reference: retryReference,
+      currency_id: 'ARS',
+      transaction_amount: 100,
+      preference_id: 'pref-retry-emulator',
+      metadata: { user_uid: userUid }
+    };
+
+    try {
+      const endpoint = baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryIncidentId + '/retry-approved-payment';
+      const headers = { authorization: 'Bearer ' + idToken };
+      const attempts = await Promise.all([
+        fetch(endpoint, { method: 'POST', headers }),
+        fetch(endpoint, { method: 'POST', headers })
+      ]);
+      const bodies = await Promise.all(attempts.map(response => response.json()));
+      assert.ok(attempts.every(response => response.status === 200), JSON.stringify(bodies));
+      assert.ok(bodies.every(body => body.success), JSON.stringify(bodies));
+
+      const product = (await firestore.collection('productos').doc(retryProductId).get()).data();
+      assert.equal(product.stockQuantity, 1, 'dos reintentos concurrentes descuentan una sola unidad');
+      assert.equal(product.stockReserved, 0);
+      const savedOrder = await firestore.collection('pedidos').doc(retryReference).get();
+      assert.equal(savedOrder.exists, true);
+      assert.equal(savedOrder.data().paymentStatus, 'approved');
+      assert.equal(savedOrder.data().inventoryCommitted, true);
+      assert.equal((await pendingRef.get()).exists, false);
+      assert.equal((await incidentRef.get()).data().status, 'resolved');
+      assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore, 'reintentar no crea otra preferencia ni inicia otro cobro');
+    } finally {
+      globalThis.__masayMockPayment = originalPayment;
+      await adminRef.delete();
+      await pendingRef.delete();
+      await incidentRef.delete();
+      await firestore.collection('pedidos').doc(retryReference).delete();
+      await firestore.collection('productos').doc(retryProductId).delete();
+    }
+  });
+
+  await t.test('el reintento administrativo conserva la incidencia y el pedido pendiente si el stock sigue agotado', async () => {
+    const retryProductId = 'http-retry-empty-' + randomUUID();
+    const retryReference = randomUUID();
+    const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(retryReference);
+    const originalPayment = globalThis.__masayMockPayment;
+
+    await firestore.collection('productos').doc(retryProductId).set({
+      name: 'Producto agotado de prueba',
+      stockManaged: true,
+      stockQuantity: 0,
+      stockReserved: 0
+    });
+    const pendingOrder = {
+      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto agotado de prueba', price: 100 }],
+      total: 100
+    };
+    await pendingRef.set({
+      uid: userUid,
+      userEmail: customerEmail,
+      total: 100,
+      preferenceId: 'pref-retry-empty-emulator',
+      order: pendingOrder,
+      inventoryReleased: true
+    });
+    await incidentRef.set({
+      type: 'approved_payment_stock_unavailable',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: retryPaymentId,
+      externalReference: retryReference,
+      total: 100,
+      currency: 'ARS',
+      uid: userUid,
+      userEmail: customerEmail,
+      order: pendingOrder
+    });
+    await adminRef.set({ enabled: true });
+    globalThis.__masayMockPayment = {
+      id: retryPaymentId,
+      status: 'approved',
+      external_reference: retryReference,
+      currency_id: 'ARS',
+      transaction_amount: 100,
+      preference_id: 'pref-retry-empty-emulator',
+      metadata: { user_uid: userUid }
+    };
+
+    try {
+      const response = await fetch(
+        baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryReference + '/retry-approved-payment',
+        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+      );
+      const body = await response.json();
+      assert.equal(response.status, 409, JSON.stringify(body));
+      assert.equal(body.success, false);
+      assert.equal((await firestore.collection('productos').doc(retryProductId).get()).data().stockQuantity, 0);
+      assert.equal((await pendingRef.get()).exists, true);
+      assert.equal((await firestore.collection('pedidos').doc(retryReference).get()).exists, false);
+      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+    } finally {
+      globalThis.__masayMockPayment = originalPayment;
+      await adminRef.delete();
+      await pendingRef.delete();
+      await incidentRef.delete();
+      await firestore.collection('pedidos').doc(retryReference).delete();
+      await firestore.collection('productos').doc(retryProductId).delete();
+    }
+  });
+
+  await t.test('el endpoint de reintento rechaza incidencias ajenas a falta de stock antes de consultar el pago', async () => {
+    const incidentId = randomUUID();
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(incidentId);
+    const paymentFetchesBefore = globalThis.__masayMockPaymentFetches;
+    await adminRef.set({ enabled: true });
+    await incidentRef.set({
+      type: 'approved_payment_validation_failed',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: '123456789',
+      externalReference: incidentId
+    });
+    try {
+      const response = await fetch(
+        baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + incidentId + '/retry-approved-payment',
+        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+      );
+      const body = await response.json();
+      assert.equal(response.status, 409, JSON.stringify(body));
+      assert.equal(body.success, false);
+      assert.equal(globalThis.__masayMockPaymentFetches, paymentFetchesBefore,
+        'una incidencia de validación nunca debe disparar el flujo de reintento de stock');
+      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+    } finally {
+      await adminRef.delete();
+      await incidentRef.delete();
+    }
+  });
+
+  t.after(async () => {
+    await firestore.collection('productos').doc(productId).delete();
+    await firestore.collection('productos').doc(raceProductId).delete();
+    await firestore.collection('productos').doc(noStockProductId).delete();
+    await firestore.collection('productos').doc(cleanupProductId).delete();
+    await firestore.collection('productos').doc(restoreProductId).delete();
+    await firestore.collection('pedidos').doc(refundOrderId).delete();
+    if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
+    await firestore.collection('pagos_pendientes').doc(expiredPendingId).delete();
+    await firestore.collection('pagos_pendientes').doc(futurePendingId).delete();
+    if (raceExternalReference) {
+      await firestore.collection('pagos_pendientes').doc(raceExternalReference).delete();
+    }
+    if (raceOrderId) {
+      await firestore.collection('pedidos').doc(raceOrderId).delete();
+    }
+    await new Promise(resolve => server.close(resolve));
+  });
+});
