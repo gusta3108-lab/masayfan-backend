@@ -617,6 +617,78 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
+  await t.test('el reintento administrativo conserva la incidencia y el pedido pendiente si el stock sigue agotado', async () => {
+    const retryProductId = 'http-retry-empty-' + randomUUID();
+    const retryReference = randomUUID();
+    const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(retryReference);
+    const originalPayment = globalThis.__masayMockPayment;
+
+    await firestore.collection('productos').doc(retryProductId).set({
+      name: 'Producto agotado de prueba',
+      stockManaged: true,
+      stockQuantity: 0,
+      stockReserved: 0
+    });
+    const pendingOrder = {
+      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto agotado de prueba', price: 100 }],
+      total: 100
+    };
+    await pendingRef.set({
+      uid: userUid,
+      userEmail: customerEmail,
+      total: 100,
+      preferenceId: 'pref-retry-empty-emulator',
+      order: pendingOrder,
+      inventoryReleased: true
+    });
+    await incidentRef.set({
+      type: 'approved_payment_stock_unavailable',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: retryPaymentId,
+      externalReference: retryReference,
+      total: 100,
+      currency: 'ARS',
+      uid: userUid,
+      userEmail: customerEmail,
+      order: pendingOrder
+    });
+    await adminRef.set({ enabled: true });
+    globalThis.__masayMockPayment = {
+      id: retryPaymentId,
+      status: 'approved',
+      external_reference: retryReference,
+      currency_id: 'ARS',
+      transaction_amount: 100,
+      preference_id: 'pref-retry-empty-emulator',
+      metadata: { user_uid: userUid }
+    };
+
+    try {
+      const response = await fetch(
+        baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryReference + '/retry-approved-payment',
+        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+      );
+      const body = await response.json();
+      assert.equal(response.status, 409, JSON.stringify(body));
+      assert.equal(body.success, false);
+      assert.equal((await firestore.collection('productos').doc(retryProductId).get()).data().stockQuantity, 0);
+      assert.equal((await pendingRef.get()).exists, true);
+      assert.equal((await firestore.collection('pedidos').doc(retryReference).get()).exists, false);
+      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+    } finally {
+      globalThis.__masayMockPayment = originalPayment;
+      await adminRef.delete();
+      await pendingRef.delete();
+      await incidentRef.delete();
+      await firestore.collection('pedidos').doc(retryReference).delete();
+      await firestore.collection('productos').doc(retryProductId).delete();
+    }
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
