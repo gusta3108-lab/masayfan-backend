@@ -762,11 +762,15 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
         if (!canTransitionTestOrderStatus(currentStatus, newStatus)) {
           throw new Error('INVALID_TEST_ORDER_TRANSITION');
         }
-        transaction.update(orderRef, {
+        const stageTimestamp = new Date().toISOString();
+        const testUpdate = {
           status: newStatus,
-          testResolution: newStatus === 'preparacion' ? 'accepted' : 'rejected',
-          testResolvedAt: new Date().toISOString()
-        });
+          testResolution: order.testResolution || (newStatus === 'rechazado' ? 'rejected' : 'accepted'),
+          testStageUpdatedAt: stageTimestamp
+        };
+        if (currentStatus === 'nuevo') testUpdate.testResolvedAt = stageTimestamp;
+        if (newStatus === 'finalizado') testUpdate.testCompletedAt = stageTimestamp;
+        transaction.update(orderRef, testUpdate);
         return;
       }
       if (!canTransitionOrderStatus(currentStatus, newStatus)) {
