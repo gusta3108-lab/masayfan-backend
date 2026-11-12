@@ -16,8 +16,7 @@ test('searches Mercado Pago by exact external reference using authenticated API 
         json: async () => ({
           paging: { total: 1 },
           results: [
-            { id: 456, external_reference: 'ref-123', status: 'approved' },
-            { id: 789, external_reference: 'other-ref', status: 'approved' }
+            { id: 456, external_reference: 'ref-123', status: 'approved' }
           ]
         })
       };
@@ -40,6 +39,23 @@ test('returns an empty list only after a successful empty search', async () => {
     fetchImpl: async () => ({ ok: true, json: async () => ({ paging: { total: 0 }, results: [] }) })
   });
   assert.deepEqual(results, []);
+});
+
+test('fails closed when Mercado Pago returns a different external reference', async () => {
+  await assert.rejects(
+    searchPaymentsByExternalReference({
+      accessToken: 'test-token',
+      externalReference: 'ref-123',
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          paging: { total: 1 },
+          results: [{ id: 456, external_reference: 'other-ref', status: 'approved' }]
+        })
+      })
+    }),
+    /referencias inconsistentes/
+  );
 });
 
 test('fails closed when Mercado Pago search is unavailable', async () => {
