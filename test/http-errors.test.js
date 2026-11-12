@@ -45,4 +45,12 @@ test('HTTP middleware returns safe JSON errors for rejected requests', async (t)
     success: false,
     error: 'La solicitud supera el tamaño permitido.'
   });
+
+  const missingRouteResponse = await fetch(`${baseUrl}/api/ruta-inexistente`);
+  assert.equal(missingRouteResponse.status, 404);
+  assert.match(missingRouteResponse.headers.get('content-type') || '', /application\\/json/);
+  assert.deepEqual(await missingRouteResponse.json(), {
+    success: false,
+    error: 'La ruta solicitada no existe.'
+  });
 });
