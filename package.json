@@ -1,11 +1,13 @@
 {
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "cleanup:inventory": "node scripts/release-expired-inventory.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "firebase-admin": "^13.5.0",
+    "firebase-admin": "^14.5.0",
     "mercadopago": "^3.6.1"
   }
 }
