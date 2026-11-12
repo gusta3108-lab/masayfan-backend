@@ -1,6 +1,6 @@
 const express = require('express');
 const crypto = require('node:crypto');
-const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder } = require('./lib/order-status');
+const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder, isTestOrder } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
 const cors = require('cors');
 const { initializeApp, cert } = require('firebase-admin/app');
@@ -758,10 +758,11 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
       const currentStatus = String(order.status || 'nuevo');
-      if (order.esPrueba === true) {
+      if (isTestOrder(order)) {
         if (!canTransitionTestOrderStatus(currentStatus, newStatus)) {
           throw new Error('INVALID_TEST_ORDER_TRANSITION');
         }
+        if (currentStatus === newStatus) return;
         const stageTimestamp = new Date().toISOString();
         const testUpdate = {
           status: newStatus,
