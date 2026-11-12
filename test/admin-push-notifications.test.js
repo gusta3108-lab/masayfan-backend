@@ -159,3 +159,16 @@ test('push sender excludes devices belonging to accounts no longer listed as adm
   assert.deepEqual(sentTokens, [tokenA]);
   assert.equal(result.tokenCount, 1);
 });
+
+
+test('push test message does not expose or create an order', () => {
+  const message = buildAdminOrderPushMessage('push-test', { pushTest: true });
+  assert.deepEqual(message.data, {
+    type: 'push_test',
+    title: 'Prueba de notificaciones de Masay',
+    body: 'Las alertas están funcionando correctamente en este dispositivo.',
+    orderId: '',
+    url: '/'
+  });
+  assert.equal(message.webpush.fcmOptions.link, 'https://www.masayfantasias.com/');
+});
