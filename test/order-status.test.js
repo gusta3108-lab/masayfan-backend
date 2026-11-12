@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canTransitionOrderStatus, canRejectOrder } = require('../lib/order-status');
+const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder } = require('../lib/order-status');
 
 test('allows the normal order lifecycle', () => {
   assert.equal(canTransitionOrderStatus('nuevo', 'preparacion'), true);
@@ -46,4 +46,13 @@ test('requires a confirmed Mercado Pago refund before rejecting a paid order', (
   assert.equal(canRejectOrder({ paymentMethod: 'mercadopago', paymentStatus: 'refunded' }), true);
   assert.equal(canRejectOrder({ paymentMethod: 'efectivo', paymentStatus: 'pending' }), true);
   assert.equal(canRejectOrder({ paymentMethod: 'prueba', paymentStatus: 'not_applicable' }), true);
+});
+
+
+test('allows test orders to be accepted or rejected only from the new state', () => {
+  assert.equal(canTransitionTestOrderStatus('nuevo', 'preparacion'), true);
+  assert.equal(canTransitionTestOrderStatus('nuevo', 'rechazado'), true);
+  assert.equal(canTransitionTestOrderStatus('preparacion', 'listo'), false);
+  assert.equal(canTransitionTestOrderStatus('rechazado', 'nuevo'), false);
+  assert.equal(canTransitionTestOrderStatus('finalizado', 'rechazado'), false);
 });
