@@ -135,9 +135,23 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     clientName: 'Cliente de prueba',
     clientPhone: '1111111111',
     address: 'Dirección de prueba',
-    notes: 'Solo emulador'
+    notes: 'Solo emulador',
+    deliveryLocation: { lat: -34.7001, lon: -58.3952 }
   };
   const items = [{ id: productId, qty: 1, price: 100, options: '' }];
+
+  await t.test('rechaza coordenadas de entrega fuera de rango', async () => {
+    const response = await fetch(baseUrl + '/api/pedidos/efectivo', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({ items, order: { ...order, deliveryLocation: { lat: 91, lon: -58.4 } } })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.match(body.error, /ubicación del mapa no es válida/i);
+    const product = (await firestore.collection('productos').doc(productId).get()).data();
+    assert.equal(product.stockQuantity, 5, 'una ubicación inválida no debe descontar inventario');
+  });
 
   await t.test('el checkout en efectivo crea el pedido y descuenta stock', async () => {
     const key = randomUUID();
@@ -153,6 +167,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(savedOrder.exists, true);
     assert.equal(savedOrder.data().paymentMethod, 'efectivo');
     assert.equal(savedOrder.data().uid, userUid);
+    assert.deepEqual(savedOrder.data().deliveryLocation, order.deliveryLocation, 'el pedido debe conservar las coordenadas seleccionadas en el mapa');
     let product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
     assert.equal(product.stockReserved, 0);
@@ -244,6 +259,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     let product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
     assert.equal(product.stockReserved, 1, 'repetir Mercado Pago no debe duplicar la reserva');
+    const pendingCheckout = (await firestore.collection('pagos_pendientes').doc(body.external_reference).get()).data();
+    assert.deepEqual(pendingCheckout.order.deliveryLocation, order.deliveryLocation, 'el checkout de Mercado Pago debe conservar las coordenadas');
 
     globalThis.__masayMockPayment = {
       id: '987654321',
