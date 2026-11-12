@@ -15,6 +15,7 @@ const {
 } = require('mercadopago');
 
 const { isAllowedOrigin } = require('./lib/cors-origin');
+const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 
 const app = express();
 app.use(cors({
@@ -414,6 +415,9 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
     return res.sendStatus(401);
   }
   if (!requireFirebaseServices(res)) return;
+  if (!mpClient || !mpToken) {
+    return res.status(503).json({ success: false, error: 'Mercado Pago no está configurado; no se liberaron reservas.' });
+  }
   try {
     const now = Timestamp.now();
     const pendingCollection = firestore.collection('pagos_pendientes');
@@ -441,11 +445,53 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
         cursor = pendingDoc;
         if (pendingDoc.data().inventoryReleased === true) continue;
         try {
-          if (await releasePendingInventory(pendingDoc.ref)) released += 1;
+          // La expiración local no demuestra que Mercado Pago no haya aprobado
+          // el pago. Consultar siempre la API antes de liberar unidades reservadas.
+          const payments = await searchPaymentsByExternalReference({
+            accessToken: mpToken,
+            externalReference: pendingDoc.id
+          });
+          if (payments.length === 0) {
+            if (await releasePendingInventory(pendingDoc.ref, { confirmedNotApproved: true })) released += 1;
+            continue;
+          }
+
+          const verifiedPayments = await Promise.all(payments.map(async result => {
+            if (!result.id) throw new Error('Mercado Pago devolvió un pago sin identificador.');
+            return new Payment(mpClient).get({ id: String(result.id) });
+          }));
+          if (verifiedPayments.some(payment => String(payment.external_reference || '') !== pendingDoc.id)) {
+            throw new Error('Mercado Pago devolvió un pago con referencia externa distinta.');
+          }
+
+          const approvedPayment = verifiedPayments.find(payment => payment.status === 'approved');
+          if (approvedPayment) {
+            const registration = await registerApprovedPayment(
+              approvedPayment.id,
+              pendingDoc.id,
+              null,
+              approvedPayment
+            );
+            if (!registration.verified && !registration.needsAdminReview) {
+              throw new Error('No se pudo completar la revisión del pago aprobado; se conserva la reserva.');
+            }
+            continue;
+          }
+
+          // Solo estados terminales explícitos permiten liberar. Pendiente,
+          // en proceso, devuelto, contracargo o cualquier estado desconocido
+          // conservan la reserva para revisión o una nueva consulta.
+          const allConfirmedNotApproved = verifiedPayments.every(payment =>
+            ['cancelled', 'rejected'].includes(String(payment.status || ''))
+          );
+          if (allConfirmedNotApproved
+            && await releasePendingInventory(pendingDoc.ref, { confirmedNotApproved: true })) {
+            released += 1;
+          }
         } catch (cleanupError) {
           failed += 1;
-          // Un registro dañado no debe impedir liberar las demás reservas vencidas.
-          console.error('No se pudo liberar una reserva vencida:', pendingDoc.id, cleanupError.message);
+          // Ante cualquier error de consulta, conservar stock y reportar la falla.
+          console.error('No se pudo verificar/liberar una reserva vencida:', pendingDoc.id, cleanupError.message);
         }
       }
       if (expired.size < pageSize) break;
