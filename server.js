@@ -938,12 +938,20 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     const clientPhone = String(order.clientPhone || '').trim().slice(0, 40);
     const address = String(order.address || '').trim().slice(0, 300);
     const notes = String(order.notes || '').trim().slice(0, 1000);
+    let deliveryLocation = null;
+    if (order.deliveryLocation != null) {
+      const { lat, lon } = order.deliveryLocation;
+      if (typeof lat !== 'number' || typeof lon !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+        throw new Error('La ubicación del mapa no es válida. Volvé a seleccionar el punto de entrega.');
+      }
+      deliveryLocation = { lat, lon };
+    }
     if (!clientName || !clientPhone || !address) {
       return res.status(400).json({ success: false, error: 'Completá nombre, teléfono y dirección.' });
     }
     const pricedItems = await priceCartItems(items);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
-    const orderData = { clientName, clientPhone, address, notes, items: pricedItems, total };
+    const orderData = { clientName, clientPhone, address, notes, ...(deliveryLocation ? { deliveryLocation } : {}), items: pricedItems, total };
     const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'efectivo');
     const orderRef = firestore.collection('pedidos').doc();
     let finalOrderId = orderRef.id;
@@ -1018,13 +1026,21 @@ app.post('/api/crear-preferencia', async (req, res) => {
     const clientPhone = String(order.clientPhone || '').trim().slice(0, 40);
     const address = String(order.address || '').trim().slice(0, 300);
     const notes = String(order.notes || '').trim().slice(0, 1000);
+    let deliveryLocation = null;
+    if (order.deliveryLocation != null) {
+      const { lat, lon } = order.deliveryLocation;
+      if (typeof lat !== 'number' || typeof lon !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+        throw new Error('La ubicación del mapa no es válida. Volvé a seleccionar el punto de entrega.');
+      }
+      deliveryLocation = { lat, lon };
+    }
     if (!clientName || !clientPhone || !address) {
       return res.status(400).json({ success: false, error: 'Completá nombre, teléfono y dirección.' });
     }
 
     const pricedItems = await priceCartItems(items);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
-    const orderData = { clientName, clientPhone, address, notes, items: pricedItems, total };
+    const orderData = { clientName, clientPhone, address, notes, ...(deliveryLocation ? { deliveryLocation } : {}), items: pricedItems, total };
     const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'mercadopago');
     const externalReference = crypto.randomUUID();
     const preference = new Preference(mpClient);
