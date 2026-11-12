@@ -49,10 +49,13 @@ test('requires a confirmed Mercado Pago refund before rejecting a paid order', (
 });
 
 
-test('allows test orders to be accepted or rejected only from the new state', () => {
+test('allows test orders to traverse preparation, ready and finalized without skipping stages', () => {
   assert.equal(canTransitionTestOrderStatus('nuevo', 'preparacion'), true);
+  assert.equal(canTransitionTestOrderStatus('preparacion', 'listo'), true);
+  assert.equal(canTransitionTestOrderStatus('listo', 'finalizado'), true);
   assert.equal(canTransitionTestOrderStatus('nuevo', 'rechazado'), true);
-  assert.equal(canTransitionTestOrderStatus('preparacion', 'listo'), false);
-  assert.equal(canTransitionTestOrderStatus('rechazado', 'nuevo'), false);
+  assert.equal(canTransitionTestOrderStatus('nuevo', 'listo'), false);
+  assert.equal(canTransitionTestOrderStatus('preparacion', 'finalizado'), false);
   assert.equal(canTransitionTestOrderStatus('finalizado', 'rechazado'), false);
+  assert.equal(canTransitionTestOrderStatus('rechazado', 'nuevo'), false);
 });
