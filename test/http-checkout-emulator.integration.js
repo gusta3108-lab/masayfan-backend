@@ -207,7 +207,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore,
       'Mercado Pago no debe recibir una solicitud de pago si no hay stock');
     assert.equal(
-      (await firestore.collection('pagos_pendientes').where('order.items', '!=', null).get()).docs
+      (await firestore.collection('pagos_pendientes').get()).docs
         .some(doc => doc.data().order?.items?.some(item => item.stockProductId === noStockProductId)),
       false,
       'no debe quedar una orden de pago pendiente para el producto agotado'
