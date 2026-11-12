@@ -594,7 +594,7 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
     }
     if (incident.type !== 'approved_payment_stock_unavailable'
       || incident.paymentStatus !== 'approved'
-      || !/^\\d{1,30}$/.test(String(incident.paymentId || ''))
+      || !/^\d{1,30}$/.test(String(incident.paymentId || ''))
       || !/^[0-9a-f-]{36}$/i.test(String(incident.externalReference || ''))) {
       return res.status(409).json({ success: false, error: 'Solo se pueden reintentar pagos aprobados cuya única incidencia sea la falta de stock.' });
     }
