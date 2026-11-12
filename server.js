@@ -1322,6 +1322,11 @@ app.post('/api/webhook', async (req, res) => {
 });
 
 
+// Las rutas inexistentes de la API también responden JSON consistente.
+app.use((_req, res) => {
+  return res.status(404).json({ success: false, error: 'La ruta solicitada no existe.' });
+});
+
 // Normaliza errores de infraestructura antes de responder al cliente.
 // Evita respuestas HTML genéricas y no expone detalles internos del servidor.
 app.use((error, _req, res, _next) => {
