@@ -505,6 +505,84 @@ app.get('/api/admin/payment-incidents', async (req, res) => {
   }
 });
 
+app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-payment', async (req, res) => {
+  try {
+    if (!requireServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const collectionName = String(req.params.collection || '');
+    const incidentId = String(req.params.incidentId || '');
+    if (collectionName !== 'incidencias_pagos' || !/^[A-Za-z0-9_-]{1,180}$/.test(incidentId)) {
+      return res.status(400).json({ success: false, error: 'Esta incidencia no admite reintento automático.' });
+    }
+
+    const incidentRef = firestore.collection(collectionName).doc(incidentId);
+    const incidentSnap = await incidentRef.get();
+    if (!incidentSnap.exists) return res.status(404).json({ success: false, error: 'La incidencia ya no existe.' });
+    const incident = incidentSnap.data();
+    if (incident.status === 'resolved') {
+      return res.json({ success: true, alreadyResolved: true, message: 'La incidencia ya estaba resuelta.' });
+    }
+    if (incident.type !== 'approved_payment_stock_unavailable'
+      || incident.paymentStatus !== 'approved'
+      || !/^\d{1,30}$/.test(String(incident.paymentId || ''))
+      || !/^[0-9a-f-]{36}$/i.test(String(incident.externalReference || ''))) {
+      return res.status(409).json({ success: false, error: 'Solo se pueden reintentar pagos aprobados cuya única incidencia sea la falta de stock.' });
+    }
+
+    // registerApprovedPayment vuelve a consultar Mercado Pago y valida referencia,
+    // moneda, importe, preferencia y usuario antes de consumir inventario.
+    // Si el stock sigue siendo insuficiente, la incidencia permanece abierta.
+    const result = await registerApprovedPayment(String(incident.paymentId), String(incident.externalReference), null);
+    if (!result.verified || result.needsAdminReview) {
+      return res.status(409).json({
+        success: false,
+        needsAdminReview: Boolean(result.needsAdminReview),
+        error: result.needsAdminReview
+          ? 'El pago sigue aprobado, pero el inventario todavía no permite completar el pedido. La incidencia continúa abierta.'
+          : 'No se pudo validar el pago nuevamente con Mercado Pago. La incidencia continúa abierta.'
+      });
+    }
+
+    await firestore.runTransaction(async transaction => {
+      const freshIncident = await transaction.get(incidentRef);
+      if (!freshIncident.exists) throw new Error('INCIDENT_NOT_FOUND');
+      const fresh = freshIncident.data();
+      if (String(fresh.paymentId || '') !== String(incident.paymentId)
+        || String(fresh.externalReference || '') !== String(incident.externalReference)) {
+        throw new Error('INCIDENT_CHANGED');
+      }
+      if (fresh.status !== 'resolved') {
+        transaction.update(incidentRef, {
+          status: 'resolved',
+          resolution: 'approved_payment_registered_after_stock_review',
+          adminResolvedAt: FieldValue.serverTimestamp(),
+          adminResolvedBy: admin.email,
+          updatedAt: FieldValue.serverTimestamp()
+        });
+      }
+    });
+    return res.json({
+      success: true,
+      alreadyRegistered: Boolean(result.alreadyRegistered),
+      message: result.alreadyRegistered
+        ? 'El pedido ya estaba registrado y la incidencia quedó resuelta.'
+        : 'Pago verificado nuevamente y pedido registrado correctamente.'
+    });
+  } catch (error) {
+    if (error.message === 'INCIDENT_NOT_FOUND') return res.status(404).json({ success: false, error: 'La incidencia ya no existe.' });
+    if (error.message === 'INCIDENT_CHANGED') return res.status(409).json({ success: false, error: 'La incidencia cambió durante la operación. Actualizá el panel.' });
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error reintentando pago aprobado:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para resolver incidencias.'
+        : 'No se pudo reintentar el registro del pago.'
+    });
+  }
+});
+
 app.post('/api/admin/payment-incidents/:collection/:incidentId/review-note', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
