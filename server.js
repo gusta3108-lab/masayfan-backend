@@ -736,7 +736,8 @@ app.post('/api/admin/push-test', async (req, res) => {
       firestore,
       messaging: firebaseMessaging,
       orderId: 'push-test',
-      order: { pushTest: true }
+      order: { pushTest: true },
+      onlyEmail: adminUser.email
     });
     return res.json({ success: true, ...result, message: 'Prueba de notificación enviada.' });
   } catch (error) {
