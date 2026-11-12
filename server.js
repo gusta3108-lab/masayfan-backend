@@ -782,7 +782,7 @@ app.post('/api/admin/test-order', async (req, res) => {
     const adminUser = await authenticatedAdmin(req);
     const orderRef = firestore.collection('pedidos').doc();
     const createdAt = new Date().toISOString();
-    await orderRef.create({
+    const testOrder = {
       esPrueba: true,
       testType: 'audio',
       clientName: 'PRUEBA DE AUDIO',
@@ -796,7 +796,11 @@ app.post('/api/admin/test-order', async (req, res) => {
       paymentMethod: 'prueba',
       paymentStatus: 'not_applicable',
       createdAt
-    });
+    };
+    await orderRef.create(testOrder);
+    // El pedido ficticio también debe probar el envío push a los dispositivos admin.
+    // La alerta es asíncrona y no convierte esta prueba en una venta ni en un cobro.
+    notifyAdminsNewOrder(orderRef.id, testOrder);
     return res.status(201).json({ success: true, order_id: orderRef.id, esPrueba: true });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
