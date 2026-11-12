@@ -390,7 +390,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     // and Firebase emulators continue using their real local fetch connections.
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (input, options) => {
-      const url = new URL(typeof input === 'string' ? input : input.url);
+      const url = new URL(input instanceof URL ? input.href : (typeof input === 'string' ? input : input.url));
       if (url.origin === 'https://api.mercadopago.com'
         && url.pathname === '/v1/payments/search') {
         return new Response(JSON.stringify({ paging: { total: 0 }, results: [] }), {
