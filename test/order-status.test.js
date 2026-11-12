@@ -50,9 +50,11 @@ test('requires a confirmed Mercado Pago refund before rejecting a paid order', (
 
 test('allows only the sequential lifecycle for audio test orders', () => {
   assert.equal(canTransitionTestOrderStatus('nuevo', 'preparacion'), true);
+  assert.equal(canTransitionTestOrderStatus('aceptado', 'listo'), true);
   assert.equal(canTransitionTestOrderStatus('preparacion', 'listo'), true);
   assert.equal(canTransitionTestOrderStatus('listo', 'finalizado'), true);
   assert.equal(canTransitionTestOrderStatus('nuevo', 'listo'), false);
+  assert.equal(canTransitionTestOrderStatus('aceptado', 'finalizado'), false);
   assert.equal(canTransitionTestOrderStatus('finalizado', 'nuevo'), false);
   assert.equal(canTransitionTestOrderStatus('rechazado', 'preparacion'), false);
 });
