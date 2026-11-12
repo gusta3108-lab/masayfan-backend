@@ -533,6 +533,68 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal((await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity, 2);
   });
 
+  await t.test('un pedido de prueba recorre todas las etapas sin tocar inventario ni pagos', async () => {
+    const testOrderId = 'http-test-order-' + randomUUID();
+    const testProductId = 'http-test-product-' + randomUUID();
+    const orderRef = firestore.collection('pedidos').doc(testOrderId);
+    const productRef = firestore.collection('productos').doc(testProductId);
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const originalStock = 7;
+    await productRef.set({
+      name: 'Producto aislado para pedido ficticio',
+      stockManaged: true,
+      stockQuantity: originalStock,
+      stockReserved: 0
+    });
+    await orderRef.set({
+      esPrueba: true,
+      status: 'nuevo',
+      paymentMethod: 'prueba',
+      paymentStatus: 'not_applicable',
+      inventoryCommitted: false,
+      items: [{ stockProductId: testProductId, qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
+    });
+    await adminRef.set({ enabled: true });
+
+    try {
+      const endpoint = baseUrl + '/api/admin/orders/' + testOrderId + '/status';
+      const adminHeaders = { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' };
+      for (const status of ['preparacion', 'listo', 'finalizado']) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: adminHeaders,
+          body: JSON.stringify({ status })
+        });
+        const body = await response.json();
+        assert.equal(response.status, 200, JSON.stringify(body));
+        assert.equal(body.success, true);
+        const saved = (await orderRef.get()).data();
+        assert.equal(saved.status, status);
+        assert.equal(saved.testResolution, 'accepted');
+        assert.equal(saved.paymentStatus, 'not_applicable');
+        assert.equal(saved.inventoryCommitted, false);
+      }
+
+      const completed = (await orderRef.get()).data();
+      assert.ok(completed.testResolvedAt);
+      assert.ok(completed.testCompletedAt);
+      const product = (await productRef.get()).data();
+      assert.equal(product.stockQuantity, originalStock);
+      assert.equal(product.stockReserved, 0);
+
+      const invalid = await fetch(endpoint, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ status: 'preparacion' })
+      });
+      assert.equal(invalid.status, 409, 'un pedido de prueba finalizado no se puede reabrir');
+    } finally {
+      await adminRef.delete();
+      await orderRef.delete();
+      await productRef.delete();
+    }
+  });
+
   await t.test('el administrador puede reintentar un pago aprobado tras liberar la reserva solo si hay stock disponible, sin duplicar el descuento', async () => {
     const retryProductId = 'http-retry-' + randomUUID();
     const retryReference = randomUUID();
