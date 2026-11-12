@@ -6,6 +6,7 @@ const cors = require('cors');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
+const { getMessaging } = require('firebase-admin/messaging');
 const {
   MercadoPagoConfig,
   Preference,
@@ -15,6 +16,7 @@ const {
 } = require('mercadopago');
 
 const { isAllowedOrigin } = require('./lib/cors-origin');
+const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 
 const app = express();
@@ -35,6 +37,7 @@ const mpClient = mpToken
 
 let firestore = null;
 let firebaseAuth = null;
+let firebaseMessaging = null;
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
@@ -47,6 +50,7 @@ try {
     });
     firestore = getFirestore(firebaseApp);
     firebaseAuth = getAuth(firebaseApp);
+    firebaseMessaging = getMessaging(firebaseApp);
   }
 } catch (error) {
   console.error('No se pudo inicializar Firebase Admin. Revisá FIREBASE_SERVICE_ACCOUNT_JSON.');
@@ -88,6 +92,16 @@ async function authenticatedAdmin(req) {
   const adminSnap = await firestore.collection('administradores').doc(user.email).get();
   if (!adminSnap.exists) throw new Error('ADMIN_REQUIRED');
   return user;
+}
+
+function notifyAdminsNewOrder(orderId, order) {
+  if (!firestore || !firebaseMessaging) return;
+  void sendAdminOrderPushNotifications({
+    firestore,
+    messaging: firebaseMessaging,
+    orderId,
+    order
+  }).catch(error => console.error('No se pudieron enviar las alertas de nuevo pedido:', error.message));
 }
 
 const money = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -324,7 +338,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   if (validationFailure) return recordApprovedPaymentValidationIncident(validationFailure, pending);
 
   try {
+    let orderCreated = false;
     await firestore.runTransaction(async transaction => {
+      orderCreated = false;
       const [freshPending, existingOrder, validationIncident] = await Promise.all([
         transaction.get(pendingRef),
         transaction.get(orderRef),
@@ -364,7 +380,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       });
       transaction.delete(pendingRef);
       if (validationIncident.exists) transaction.delete(validationIncidentRef);
+      orderCreated = true;
     });
+    if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
     return { verified: true, alreadyRegistered: false };
   } catch (registrationError) {
     // El pago ya fue validado directamente con Mercado Pago. Si la reserva venció
@@ -707,6 +725,34 @@ app.get('/health', (_req, res) => {
   });
 });
 
+app.post('/api/admin/push-token', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const adminUser = await authenticatedAdmin(req);
+    const token = String(req.body?.token || '');
+    const tokenId = await registerAdminPushToken({ firestore, email: adminUser.email, token });
+    return res.json({ success: true, tokenId });
+  } catch (error) {
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para activar alertas.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    return res.status(400).json({ success: false, error: error.message || 'No se pudo registrar el dispositivo.' });
+  }
+});
+
+app.delete('/api/admin/push-token', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const adminUser = await authenticatedAdmin(req);
+    const token = String(req.body?.token || '');
+    const removed = await removeAdminPushToken({ firestore, email: adminUser.email, token });
+    return res.json({ success: true, removed });
+  } catch (error) {
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para desactivar alertas.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    return res.status(400).json({ success: false, error: error.message || 'No se pudo desactivar el dispositivo.' });
+  }
+});
+
 app.post('/api/admin/test-order', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
@@ -875,7 +921,9 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     const orderRef = firestore.collection('pedidos').doc();
     let finalOrderId = orderRef.id;
     let replayed = false;
+    let orderCreated = false;
     await firestore.runTransaction(async transaction => {
+      orderCreated = false;
       const idempotencySnap = await transaction.get(idempotency.ref);
       if (idempotencySnap.exists) {
         const previous = idempotencySnap.data();
@@ -900,6 +948,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         inventoryCommitted: true,
         createdAt: new Date().toISOString()
       });
+      orderCreated = true;
       transaction.set(idempotency.ref, {
         uid: user.uid,
         paymentMethod: 'efectivo',
@@ -909,6 +958,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         createdAt: FieldValue.serverTimestamp()
       });
     });
+    if (orderCreated) notifyAdminsNewOrder(finalOrderId, orderData);
     return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, replayed });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
