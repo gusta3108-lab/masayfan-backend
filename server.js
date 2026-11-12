@@ -25,7 +25,7 @@ app.use(cors({
     if (!origin || isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error('Origen no autorizado por CORS'));
   },
-  methods: ['GET', 'POST'],
+  methods: ['GET', 'POST', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key']
 }));
 app.use(express.json({ limit: '100kb' }));
