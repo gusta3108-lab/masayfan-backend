@@ -89,7 +89,13 @@ test('push sender sends to registered devices and removes expired FCM tokens', a
     { id: 'a', data: () => ({ token: tokenA, email: 'admin@masayfantasias.com' }), ref: { delete: async () => deleted.push('a') } },
     { id: 'b', data: () => ({ token: tokenB, email: 'admin@masayfantasias.com' }), ref: { delete: async () => deleted.push('b') } }
   ];
-  const firestore = { collection: () => ({ get: async () => ({ docs }) }) };
+  const firestore = {
+    collection(name) {
+      return name === 'admin_push_tokens'
+        ? { get: async () => ({ docs }) }
+        : { get: async () => ({ docs: [{ id: 'admin@masayfantasias.com', data: () => ({}) }] }) };
+    }
+  };
   let sent;
   const messaging = {
     sendEachForMulticast: async message => {
@@ -118,11 +124,38 @@ test('push sender sends to registered devices and removes expired FCM tokens', a
 test('push sender does not call FCM when no administrator devices are registered', async () => {
   let called = false;
   const result = await sendAdminOrderPushNotifications({
-    firestore: { collection: () => ({ get: async () => ({ docs: [] }) }) },
+    firestore: {
+      collection: () => ({ get: async () => ({ docs: [] }) })
+    },
     messaging: { sendEachForMulticast: async () => { called = true; } },
     orderId: 'order-empty',
     order: {}
   });
   assert.equal(called, false);
   assert.deepEqual(result, { successCount: 0, failureCount: 0, tokenCount: 0 });
+});
+
+test('push sender excludes devices belonging to accounts no longer listed as administrators', async () => {
+  const docs = [
+    { id: 'active', data: () => ({ token: tokenA, email: 'admin@masayfantasias.com' }), ref: { delete: async () => {} } },
+    { id: 'revoked', data: () => ({ token: tokenB, email: 'revoked@masayfantasias.com' }), ref: { delete: async () => {} } }
+  ];
+  const firestore = {
+    collection(name) {
+      if (name === 'admin_push_tokens') return { get: async () => ({ docs }) };
+      return { get: async () => ({ docs: [{ id: 'admin@masayfantasias.com', data: () => ({}) }] }) };
+    }
+  };
+  let sentTokens = [];
+  const messaging = {
+    sendEachForMulticast: async message => {
+      sentTokens = message.tokens;
+      return { successCount: 1, failureCount: 0, responses: [{ success: true }] };
+    }
+  };
+  const result = await sendAdminOrderPushNotifications({
+    firestore, messaging, orderId: 'order-active', order: { clientName: 'Cliente', total: 100 }
+  });
+  assert.deepEqual(sentTokens, [tokenA]);
+  assert.equal(result.tokenCount, 1);
 });
