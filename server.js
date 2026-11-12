@@ -1321,6 +1321,26 @@ app.post('/api/webhook', async (req, res) => {
   }
 });
 
+
+// Normaliza errores de infraestructura antes de responder al cliente.
+// Evita respuestas HTML genéricas y no expone detalles internos del servidor.
+app.use((error, _req, res, _next) => {
+  if (res.headersSent) return;
+
+  if (error.message === 'Origen no autorizado por CORS') {
+    return res.status(403).json({ success: false, error: 'Origen no autorizado.' });
+  }
+  if (error.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, error: 'La solicitud supera el tamaño permitido.' });
+  }
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, error: 'El cuerpo JSON de la solicitud no es válido.' });
+  }
+
+  console.error('Error HTTP no controlado:', error.message);
+  return res.status(500).json({ success: false, error: 'Error interno del servidor.' });
+});
+
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
