@@ -485,8 +485,8 @@ app.get('/api/admin/payment-incidents', async (req, res) => {
       firestore.collection('incidencias_checkout').orderBy('createdAt', 'desc').limit(50).get()
     ]);
     const incidents = [
-      ...paymentIncidents.docs.map(doc => ({ id: doc.id, ...doc.data() })),
-      ...checkoutIncidents.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+      ...paymentIncidents.docs.map(doc => ({ id: doc.id, sourceCollection: 'incidencias_pagos', ...doc.data() })),
+      ...checkoutIncidents.docs.map(doc => ({ id: doc.id, sourceCollection: 'incidencias_checkout', ...doc.data() }))
     ].sort((a, b) => {
       const toMillis = value => value?.toMillis ? value.toMillis() : (value ? new Date(value).getTime() : 0);
       return toMillis(b.createdAt) - toMillis(a.createdAt);
@@ -501,6 +501,46 @@ app.get('/api/admin/payment-incidents', async (req, res) => {
       error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
         : adminError ? 'No tenés permisos para consultar incidencias.'
         : 'No se pudieron consultar las incidencias de pago.'
+    });
+  }
+});
+
+app.post('/api/admin/payment-incidents/:collection/:incidentId/review-note', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const collectionName = String(req.params.collection || '');
+    const incidentId = String(req.params.incidentId || '');
+    const note = String(req.body?.note || '').trim();
+    if (!['incidencias_pagos', 'incidencias_checkout'].includes(collectionName)
+      || !/^[A-Za-z0-9_-]{1,180}$/.test(incidentId)) {
+      return res.status(400).json({ success: false, error: 'La incidencia indicada no es válida.' });
+    }
+    if (note.length < 5 || note.length > 1000) {
+      return res.status(400).json({ success: false, error: 'La nota debe tener entre 5 y 1000 caracteres.' });
+    }
+    const incidentRef = firestore.collection(collectionName).doc(incidentId);
+    await firestore.runTransaction(async transaction => {
+      const incidentSnap = await transaction.get(incidentRef);
+      if (!incidentSnap.exists) throw new Error('INCIDENT_NOT_FOUND');
+      transaction.update(incidentRef, {
+        adminReviewNote: note,
+        adminReviewedAt: FieldValue.serverTimestamp(),
+        adminReviewedBy: admin.email,
+        updatedAt: FieldValue.serverTimestamp()
+      });
+    });
+    return res.json({ success: true, incident_id: incidentId, reviewed: true });
+  } catch (error) {
+    if (error.message === 'INCIDENT_NOT_FOUND') return res.status(404).json({ success: false, error: 'La incidencia ya no existe.' });
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error registrando revisión de incidencia:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para revisar incidencias.'
+        : 'No se pudo guardar la nota de revisión.'
     });
   }
 });
