@@ -1,10 +1,14 @@
-# Firebase Firestore rules deployment (GitHub OIDC)
+# Publicación de reglas de Firebase Firestore mediante GitHub OIDC
 
-This repository deploys only `firestore.rules` to the production Firebase project `masayfantasias`. It uses GitHub OIDC / Google Workload Identity Federation; no service-account JSON key is stored in GitHub.
+Este repositorio publica únicamente el archivo `firestore.rules` en el proyecto Firebase de producción `masayfantasias`. La autenticación utiliza GitHub OIDC y la federación de identidades de Google (Workload Identity Federation). No se guarda ninguna clave JSON de cuenta de servicio en GitHub.
 
-## One-time Google Cloud setup
+## 1. Configuración inicial en Google Cloud (se hace una sola vez)
 
-Run these commands as a Google Cloud project administrator with permission to manage Workload Identity Federation and service accounts. They create a narrowly scoped deployer identity. The provider accepts tokens only from this repository and deployment branch.
+Abre la consola de Google Cloud con una cuenta que tenga permisos de administración del proyecto y de creación de grupos de identidades federadas y cuentas de servicio.
+
+1. Selecciona el proyecto `masayfantasias`.
+2. Abre **Cloud Shell** (el icono de terminal en la parte superior de la consola).
+3. Copia y ejecuta el bloque completo de comandos que aparece abajo. Estos comandos crean una identidad con permisos limitados. El proveedor aceptará tokens únicamente de este repositorio y de la rama autorizada.
 
 ```bash
 PROJECT_ID=masayfantasias
@@ -41,20 +45,35 @@ gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$POOL_ID/attribute.repository/$REPOSITORY"
 ```
 
-## One-time GitHub configuration
+**Importante:** si Cloud Shell indica que el grupo, proveedor o cuenta de servicio ya existe, no repitas los comandos de creación a ciegas. Detente y revisa el recurso existente antes de continuar. No compartas contraseñas, tokens ni claves privadas.
 
-On the repository's **Settings → Secrets and variables → Actions → Variables**, add these repository variables:
+## 2. Configuración inicial en GitHub (se hace una sola vez)
 
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`: `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github` (replace `PROJECT_NUMBER` with the value returned above).
-- `FIREBASE_DEPLOY_SERVICE_ACCOUNT`: `firebase-rules-deployer@masayfantasias.iam.gserviceaccount.com`.
+Entra al repositorio [gusta3108-lab/masayfan-backend](https://github.com/gusta3108-lab/masayfan-backend).
 
-Create a GitHub Actions environment named `firebase-production` under **Settings → Environments**. Optionally add required reviewers there to gate production deployments.
+1. Ve a **Settings → Secrets and variables → Actions → Variables**.
+2. Pulsa **New repository variable** y crea estas dos variables:
 
-## Operation
+| Nombre | Valor |
+|---|---|
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github` |
+| `FIREBASE_DEPLOY_SERVICE_ACCOUNT` | `firebase-rules-deployer@masayfantasias.iam.gserviceaccount.com` |
 
-- The workflow can be started manually with **Actions → Deploy Firestore rules → Run workflow**.
-- It also runs when `firestore.rules`, `firebase.json`, or this workflow changes on `fix/verified-mercadopago-payments`.
-- It deploys rules only; it does not modify Firestore documents, customer records, orders, inventory, payments, hosting, or backend services.
-- A successful workflow run is the confirmation of publication. Emulator tests remain separate and do not imply production deployment.
+En la primera variable, reemplaza `PROJECT_NUMBER` por el número que devolvió el comando `gcloud projects describe` del paso 1. No escribas literalmente la palabra `PROJECT_NUMBER`.
 
-Do not create or upload a service-account private key. If the deployer identity or variables are missing, the workflow will fail closed without publishing.
+3. Ve a **Settings → Environments** y crea un entorno llamado exactamente `firebase-production`. Puedes añadir revisores obligatorios si quieres que alguien apruebe cada publicación.
+
+## 3. Ejecutar la publicación de reglas
+
+1. Abre la pestaña **Actions** del repositorio.
+2. Selecciona el flujo **Deploy Firestore rules**.
+3. Pulsa **Run workflow** y confirma la ejecución en la rama `fix/verified-mercadopago-payments`.
+4. Espera a que termine. La publicación solo se considera confirmada si la ejecución finaliza correctamente (**Success**, con marca verde).
+
+El flujo también se ejecutará automáticamente cuando cambien `firestore.rules`, `firebase.json` o el propio archivo del flujo en la rama autorizada.
+
+## Qué modifica y qué no modifica
+
+Este flujo publica únicamente las reglas de seguridad de Firestore. No modifica documentos de Firestore, clientes, pedidos, inventario, pagos, alojamiento web ni servicios del backend. Las pruebas del emulador son independientes y no significan que las reglas ya estén publicadas en producción.
+
+**No crees ni subas una clave privada JSON de la cuenta de servicio.** La autenticación federada evita tener que almacenar ese tipo de clave en GitHub. Si faltan la identidad federada o las variables, el flujo debe fallar sin publicar cambios.
