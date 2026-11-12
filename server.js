@@ -668,7 +668,8 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       const currentStatus = String(order.status || 'nuevo');
       // Los pedidos de prueba no son ventas: sólo actualizan su propio estado y metadatos.
       // Nunca reservan/devuelven stock ni modifican pagos o contabilidad.
-      if (order.esPrueba === true) {
+      const isTestOrder = order.esPrueba === true || order.testType === 'audio' || order.paymentMethod === 'prueba';
+      if (isTestOrder) {
         if (!canTransitionTestOrderStatus(currentStatus, newStatus)) {
           throw new Error('INVALID_TEST_ORDER_TRANSITION');
         }
