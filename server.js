@@ -449,6 +449,11 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
         cursor = pendingDoc;
         if (pendingDoc.data().inventoryReleased === true) continue;
         try {
+          // Incidencias de creación ambigua o pagos aprobados con datos inconsistentes
+          // requieren revisión; no se liberan automáticamente ni se reintentan a ciegas.
+          const pendingData = pendingDoc.data();
+          if (pendingData.preferenceCreationNeedsReview === true
+            || pendingData.paymentApprovedNeedsReview === true) continue;
           // La expiración local no demuestra que Mercado Pago no haya aprobado
           // el pago. Consultar siempre la API antes de liberar unidades reservadas.
           const payments = await searchPaymentsByExternalReference({
