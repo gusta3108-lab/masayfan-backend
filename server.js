@@ -758,6 +758,17 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
       const currentStatus = String(order.status || 'nuevo');
+      if (order.esPrueba === true) {
+        if (currentStatus !== 'nuevo' || !['preparacion', 'rechazado'].includes(newStatus)) {
+          throw new Error('INVALID_TEST_ORDER_TRANSITION');
+        }
+        transaction.update(orderRef, {
+          status: newStatus,
+          testResolution: newStatus === 'preparacion' ? 'accepted' : 'rejected',
+          testResolvedAt: new Date().toISOString()
+        });
+        return;
+      }
       if (!canTransitionOrderStatus(currentStatus, newStatus)) {
         throw new Error('INVALID_STATUS_TRANSITION');
       }
@@ -793,6 +804,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
     return res.json({ success: true, order_id: orderId, status: newStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'INVALID_TEST_ORDER_TRANSITION') return res.status(409).json({ success: false, error: 'La prueba ya fue resuelta o el estado solicitado no es válido.' });
     if (error.message === 'INVALID_STATUS_TRANSITION') return res.status(409).json({ success: false, error: 'Ese cambio de estado no está permitido. Los pedidos entregados o rechazados no se pueden reabrir ni rechazar nuevamente.' });
     if (error.message === 'PAYMENT_REFUND_REQUIRED') return res.status(409).json({ success: false, error: 'Este pedido fue cobrado con Mercado Pago. Primero realizá la devolución desde Mercado Pago y esperá que el pedido muestre DEVUELTO; recién entonces podrás rechazarlo y devolver el stock. Si figura CONTRACARGO, requiere revisión manual.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para modificar pedidos.' });
