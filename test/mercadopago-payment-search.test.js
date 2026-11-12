@@ -76,7 +76,7 @@ test('fails closed on malformed or incomplete search responses', async () => {
       externalReference: 'ref-123',
       fetchImpl: async () => ({ ok: true, json: async () => ({ results: [], paging: { total: 60 } }) })
     }),
-    /paginada/
+    /incompleta/
   );
   await assert.rejects(
     searchPaymentsByExternalReference({
