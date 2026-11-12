@@ -1,9 +1,7 @@
-name: Scheduled inventory reservation cleanup
-run-name: "Scheduled inventory cleanup (${{ github.event_name }})"
+name: Manual inventory reservation cleanup
+run-name: "Manual inventory cleanup (${{ github.event_name }})"
 
 on:
-  schedule:
-    - cron: "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
   workflow_dispatch:
 
 permissions:
