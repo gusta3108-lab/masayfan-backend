@@ -767,7 +767,13 @@ app.post('/api/crear-preferencia', async (req, res) => {
           const ageMs = createdAt ? Date.now() - createdAt.getTime() : 0;
           if (ageMs >= 5 * 60 * 1000) {
             const incidentRef = firestore.collection('incidencias_checkout').doc(idempotency.ref.id);
-            const incidentSnap = await transaction.get(incidentRef);
+            const pendingRef = previous.externalReference
+              ? firestore.collection('pagos_pendientes').doc(String(previous.externalReference))
+              : null;
+            const [incidentSnap, pendingSnap] = await Promise.all([
+              transaction.get(incidentRef),
+              pendingRef ? transaction.get(pendingRef) : Promise.resolve(null)
+            ]);
             if (!incidentSnap.exists) {
               transaction.create(incidentRef, {
                 type: 'mercadopago_preference_creation_interrupted',
@@ -778,6 +784,12 @@ app.post('/api/crear-preferencia', async (req, res) => {
                 checkoutRequestId: idempotency.ref.id,
                 createdAt: FieldValue.serverTimestamp(),
                 description: 'El intento quedó en processing más de cinco minutos. Verificar en Mercado Pago si se creó una preferencia antes de liberar la reserva o reintentar.'
+              });
+            }
+            if (pendingRef && pendingSnap?.exists) {
+              transaction.update(pendingRef, {
+                preferenceCreationNeedsReview: true,
+                preferenceCreationFailedAt: FieldValue.serverTimestamp()
               });
             }
             transaction.update(idempotency.ref, {
@@ -980,8 +992,13 @@ app.post('/api/webhook', async (req, res) => {
     if (!reference) return res.sendStatus(200);
     if (payment.status !== 'approved') {
       const paymentStatus = String(payment.status || '');
-      if (['cancelled', 'rejected', 'refunded', 'charged_back'].includes(paymentStatus)) {
-        await releasePendingInventory(firestore.collection('pagos_pendientes').doc(reference));
+      if (['cancelled', 'rejected'].includes(paymentStatus)) {
+        // Mercado Pago confirmó que este intento no fue aprobado: ya es seguro
+        // liberar una reserva retenida por la creación ambigua de la preferencia.
+        await releasePendingInventory(
+          firestore.collection('pagos_pendientes').doc(reference),
+          { confirmedNotApproved: true }
+        );
       }
       // Una devolución o contracargo posterior a la aprobación debe reflejarse
       // en el pedido existente. No se repone stock automáticamente: el producto

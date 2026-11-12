@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { stockRequirements } = require('../lib/inventory');
+const { stockRequirements, shouldRetainInventoryReservation } = require('../lib/inventory');
 
 test('aggregates valid quantities for repeated product lines', () => {
   assert.deepEqual(
@@ -42,4 +42,21 @@ test('keeps legacy order lines without a stock product identifier outside stock 
     stockRequirements([{ id: 'legacy-product', qty: 2 }]),
     []
   );
+});
+
+
+test('retains a reservation while preference creation is ambiguous', () => {
+  assert.equal(shouldRetainInventoryReservation({ preferenceCreationNeedsReview: true }), true);
+});
+
+test('does not release an approved payment awaiting administrative review', () => {
+  assert.equal(shouldRetainInventoryReservation({ paymentApprovedNeedsReview: true, preferenceCreationNeedsReview: true }, { confirmedNotApproved: true }), true);
+});
+
+test('allows release after Mercado Pago confirms the payment was not approved', () => {
+  assert.equal(shouldRetainInventoryReservation({ preferenceCreationNeedsReview: true }, { confirmedNotApproved: true }), false);
+});
+
+test('allows normal expiry cleanup when no review flag exists', () => {
+  assert.equal(shouldRetainInventoryReservation({ inventoryReleased: false }), false);
 });
