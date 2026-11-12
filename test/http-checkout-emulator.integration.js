@@ -360,7 +360,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     const productRef = firestore.collection('productos').doc(cleanupProductId);
     const expiredRef = firestore.collection('pagos_pendientes').doc(expiredPendingId);
     const futureRef = firestore.collection('pagos_pendientes').doc(futurePendingId);
-    const expiredAt = Timestamp.fromDate(new Date(Date.now() - 60000));
+    const expiredAt = Timestamp.fromDate(new Date(Date.now() - 31 * 60 * 1000));
     const futureAt = Timestamp.fromDate(new Date(Date.now() + 60000));
     await productRef.set({
       name: 'Producto de limpieza HTTP',
@@ -371,6 +371,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await expiredRef.set({
       order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
       inventoryReleased: false,
+      preferenceId: 'pref-expired-emulator',
       expiresAt: expiredAt
     });
     await futureRef.set({
@@ -385,8 +386,28 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal((await productRef.get()).data().stockReserved, 2);
 
     const headersWithCleanupSecret = { 'x-inventory-cleanup-secret': process.env.INVENTORY_CLEANUP_SECRET };
-    const firstRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
-    const firstBody = await firstRun.json();
+    // Mock only the Mercado Pago payment-search endpoint. The local HTTP server
+    // and Firebase emulators continue using their real local fetch connections.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, options) => {
+      const url = new URL(typeof input === 'string' ? input : input.url);
+      if (url.origin === 'https://api.mercadopago.com'
+        && url.pathname === '/v1/payments/search') {
+        return new Response(JSON.stringify({ paging: { total: 0 }, results: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      return originalFetch(input, options);
+    };
+    let firstRun;
+    let firstBody;
+    try {
+      firstRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
+      firstBody = await firstRun.json();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
     assert.equal(firstRun.status, 200, JSON.stringify(firstBody));
     assert.equal(firstBody.success, true);
     assert.equal(firstBody.released, 1);
