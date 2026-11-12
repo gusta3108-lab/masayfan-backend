@@ -172,3 +172,34 @@ test('push test message does not expose or create an order', () => {
   });
   assert.equal(message.webpush.fcmOptions.link, 'https://www.masayfantasias.com/');
 });
+
+
+test('push test can be scoped to devices owned by the requesting administrator', async () => {
+  const docs = [
+    { id: 'a', data: () => ({ token: tokenA, email: 'admin@masayfantasias.com' }), ref: { delete: async () => {} } },
+    { id: 'b', data: () => ({ token: tokenB, email: 'other@masayfantasias.com' }), ref: { delete: async () => {} } }
+  ];
+  const firestore = {
+    collection(name) {
+      return name === 'admin_push_tokens'
+        ? { get: async () => ({ docs }) }
+        : { get: async () => ({ docs: [
+          { id: 'admin@masayfantasias.com', data: () => ({}) },
+          { id: 'other@masayfantasias.com', data: () => ({}) }
+        ] }) };
+    }
+  };
+  let sentTokens = [];
+  const messaging = {
+    sendEachForMulticast: async message => {
+      sentTokens = message.tokens;
+      return { successCount: 1, failureCount: 0, responses: [{ success: true }] };
+    }
+  };
+  const result = await sendAdminOrderPushNotifications({
+    firestore, messaging, orderId: 'push-test', order: { pushTest: true },
+    onlyEmail: 'ADMIN@MASAYFANTASIAS.COM'
+  });
+  assert.deepEqual(sentTokens, [tokenA]);
+  assert.equal(result.tokenCount, 1);
+});
