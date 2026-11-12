@@ -204,7 +204,7 @@ test('Firestore rules authorize the admin console without exposing admin data to
     const adminWrite = await request('config/local', {
       token: admin.idToken,
       method: 'PATCH',
-      body: { fields: { abierto: { booleanValue: false } } }
+      body: { fields: { abierto: { booleanValue: true } } }
     });
     assert.equal(adminWrite.status, 200, await adminWrite.text());
   });
