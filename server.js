@@ -106,6 +106,7 @@ function checkoutIdempotency(req, user, items, order, paymentMethod) {
 const { stockRequirements, createInventoryService } = require('./lib/inventory');
 const inventoryService = createInventoryService({ getFirestore: () => firestore });
 const { reserveInventory, releasePendingInventory, completeInventorySale } = inventoryService;
+const { shouldReleaseExpiredReservation } = require('./lib/payment-cleanup');
 
 function stockErrorResponse(error, res) {
   if (!String(error.message || '').startsWith('STOCK_INSUFFICIENT:')) return false;
@@ -337,7 +338,10 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
-      await completeInventorySale(transaction, data.order.items, data.inventoryReleased !== true);
+      // Never convert an expired/released reservation into a sale after payment.
+      // A late approval must be reconciled; it cannot consume unreserved stock.
+      if (data.inventoryReleased === true) throw new Error('RESERVATION_EXPIRED');
+      await completeInventorySale(transaction, data.order.items, true);
       transaction.set(orderRef, {
         ...data.order,
         userEmail: data.userEmail,
@@ -357,7 +361,8 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     // El pago ya fue validado directamente con Mercado Pago. Si la reserva venció
     // y otro cliente consumió el stock, registrar una incidencia durable en vez
     // de dejar el webhook reintentando sin que administración pueda verla.
-    if (!String(registrationError.message || '').startsWith('STOCK_INSUFFICIENT:')) {
+    if (!String(registrationError.message || '').startsWith('STOCK_INSUFFICIENT:')
+      && registrationError.message !== 'RESERVATION_EXPIRED') {
       throw registrationError;
     }
     const incidentRef = firestore.collection('incidencias_pagos').doc(reference);
@@ -414,6 +419,7 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
     return res.sendStatus(401);
   }
   if (!requireFirebaseServices(res)) return;
+  if (!mpToken) return res.status(503).json({ success: false, error: 'Mercado Pago no está configurado para verificar pagos antes de liberar reservas.' });
   try {
     const now = Timestamp.now();
     const pendingCollection = firestore.collection('pagos_pendientes');
@@ -423,6 +429,7 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
     let released = 0;
     let failed = 0;
     let checked = 0;
+    let held = 0;
     let truncated = false;
 
     // Paginar dentro de una ejecución evita que 100 documentos dañados al inicio
@@ -441,6 +448,40 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
         cursor = pendingDoc;
         if (pendingDoc.data().inventoryReleased === true) continue;
         try {
+          const pending = pendingDoc.data();
+          if (!mpToken || !pending.preferenceId) {
+            held += 1;
+            continue;
+          }
+          const searchEnd = new Date();
+          const searchStart = new Date(searchEnd.getTime() - 365 * 24 * 60 * 60 * 1000);
+          const searchParams = new URLSearchParams({
+            external_reference: pendingDoc.id,
+            sort: 'date_created',
+            criteria: 'desc',
+            range: 'date_created',
+            begin_date: searchStart.toISOString(),
+            end_date: searchEnd.toISOString(),
+            limit: '50'
+          });
+          const paymentSearchResponse = await fetch(
+            'https://api.mercadopago.com/v1/payments/search?' + searchParams.toString(),
+            {
+              headers: { Authorization: 'Bearer ' + mpToken, Accept: 'application/json' },
+              signal: AbortSignal.timeout(10000)
+            }
+          );
+          if (!paymentSearchResponse.ok) {
+            throw new Error('Mercado Pago payment search respondió HTTP ' + paymentSearchResponse.status);
+          }
+          const paymentSearch = await paymentSearchResponse.json();
+          if (!Array.isArray(paymentSearch.results)) {
+            throw new Error('Mercado Pago devolvió una búsqueda de pagos inválida.');
+          }
+          if (!shouldReleaseExpiredReservation(pending, paymentSearch.results)) {
+            held += 1;
+            continue;
+          }
           if (await releasePendingInventory(pendingDoc.ref)) released += 1;
         } catch (cleanupError) {
           failed += 1;
@@ -465,6 +506,7 @@ app.post('/api/internal/release-expired-inventory', async (req, res) => {
     return res.json({
       success: failed === 0 && !truncated,
       released,
+      held,
       failed,
       checked,
       maxPages,
