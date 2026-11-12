@@ -29,6 +29,7 @@ process.env.MP_WEBHOOK_SECRET = 'local-emulator-webhook-secret';
 process.env.INVENTORY_CLEANUP_SECRET = 'local-emulator-cleanup-secret';
 
 globalThis.__masayMockPreference = null;
+globalThis.__masayMockPreferenceCalls = 0;
 globalThis.__masayMockPayment = null;
 globalThis.__masayMockPaymentFetches = 0;
 
@@ -37,6 +38,7 @@ class MercadoPagoConfig {
 }
 class Preference {
   async create({ body }) {
+    globalThis.__masayMockPreferenceCalls += 1;
     globalThis.__masayMockPreference = body;
     return { id: 'pref-emulator-001', init_point: 'https://sandbox.invalid/checkout/emulator' };
   }
@@ -85,6 +87,7 @@ let userUid;
 let customerEmail = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
+const noStockProductId = 'http-no-stock-' + randomUUID();
 const cleanupProductId = 'http-cleanup-' + randomUUID();
 const expiredPendingId = 'http-expired-' + randomUUID();
 const futurePendingId = 'http-future-' + randomUUID();
@@ -177,6 +180,41 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 4);
     assert.equal(product.stockReserved, 0, 'reutilizar la clave entre métodos no debe reservar stock');
+  });
+
+  await t.test('sin stock no se genera preferencia ni se registra un pago pendiente', async () => {
+    await firestore.collection('productos').doc(noStockProductId).set({
+      name: 'Producto agotado de prueba',
+      price: 100,
+      activo: true,
+      stockManaged: true,
+      stockQuantity: 0,
+      stockReserved: 0
+    });
+    const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
+    const response = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({
+        items: [{ id: noStockProductId, qty: 1, price: 100, options: '' }],
+        order
+      })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 409, JSON.stringify(body));
+    assert.equal(body.code, 'STOCK_INSUFFICIENT');
+    assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore,
+      'Mercado Pago no debe recibir una solicitud de pago si no hay stock');
+    assert.equal(
+      (await firestore.collection('pagos_pendientes').get()).docs
+        .some(doc => doc.data().order?.items?.some(item => item.stockProductId === noStockProductId)),
+      false,
+      'no debe quedar una orden de pago pendiente para el producto agotado'
+    );
+    const product = (await firestore.collection('productos').doc(noStockProductId).get()).data();
+    assert.equal(product.stockQuantity, 0);
+    assert.equal(product.stockReserved, 0);
   });
 
   await t.test('Mercado Pago reserva stock y el webhook simulado confirma una sola venta', async () => {
@@ -498,6 +536,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
+    await firestore.collection('productos').doc(noStockProductId).delete();
     await firestore.collection('productos').doc(cleanupProductId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
