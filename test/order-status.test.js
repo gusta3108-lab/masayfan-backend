@@ -10,6 +10,13 @@ test('allows the normal order lifecycle', () => {
   assert.equal(canTransitionOrderStatus('listo', 'finalizado'), true);
 });
 
+test('allows legacy accepted orders to move to ready without skipping stages', () => {
+  assert.equal(canTransitionOrderStatus('aceptado', 'listo'), true);
+  assert.equal(canTransitionOrderStatus('aceptado', 'rechazado'), true);
+  assert.equal(canTransitionOrderStatus('aceptado', 'finalizado'), false);
+  assert.equal(canTransitionOrderStatus('aceptado', 'nuevo'), false);
+});
+
 test('allows rejection before delivery', () => {
   assert.equal(canTransitionOrderStatus('nuevo', 'rechazado'), true);
   assert.equal(canTransitionOrderStatus('preparacion', 'rechazado'), true);
