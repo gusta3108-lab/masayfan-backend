@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/administradores/$(request.auth.token.email));
+    }
+
+    // Catálogo público: los visitantes pueden consultar, solo administración modifica.
+    match /productos/{id} {
+      allow read: if true;
+      allow create, update: if isAdmin();
+      // Productos que tuvieron inventario no se eliminan: pedidos aún activos
+      // pueden necesitar devolver unidades al rechazar una venta.
+      allow delete: if isAdmin() && !resource.data.keys().hasAny(['stockQuantity', 'stockReserved']);
+    }
+
+    // Los costos de producción son privados y solo accesibles por administradores.
+    match /costos_productos/{id} {
+      allow read, write: if isAdmin();
+    }
+    match /opcionales/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /secciones/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /banners/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Solo se publica el estado de apertura del local.
+    match /config/local {
+      allow get: if true;
+      allow list: if false;
+      allow write: if isAdmin();
+    }
+
+    // Los pedidos se crean en el servidor. El cliente solo ve los suyos.
+    match /pedidos/{id} {
+      allow get, list: if isAdmin()
+        || (signedIn()
+          && resource.data.userEmail == request.auth.token.email);
+      allow create: if false;
+      allow update, delete: if false;
+    }
+
+    // Perfil mínimo: lectura y creación por su titular; no puede elevar permisos.
+    match /clientes/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list: if false;
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['correo', 'createdAt'])
+        && request.resource.data.keys().hasAll(['correo', 'createdAt'])
+        && request.resource.data.correo == request.auth.token.email;
+      allow update, delete: if false;
+    }
+
+    // La administración se valida por existencia del documento cuyo ID es el email.
+    // Cada administrador solo puede consultar su propio documento.
+    match /administradores/{email} {
+      allow get: if signedIn() && request.auth.token.email == email;
+      allow list, create, update, delete: if false;
+    }
+
+    // Ni clientes ni navegador pueden consultar o modificar intentos de pago.
+    match /pagos_pendientes/{id} {
+      allow read, write: if false;
+    }
+
+    // Cualquier colección no declarada queda cerrada.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

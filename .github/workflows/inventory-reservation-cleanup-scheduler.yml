@@ -26,7 +26,7 @@ jobs:
       - name: Checkout backend with cleanup script
         uses: actions/checkout@v4
         with:
-          ref: fix/verified-mercadopago-payments
+          ref: main
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
