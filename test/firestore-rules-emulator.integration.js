@@ -118,3 +118,94 @@ test('Firestore security rules enforce public, owner, and server-only access', a
     assert.equal(response.status, 403);
   });
 });
+
+test('Firestore rules authorize the admin console without exposing admin data to customers', async t => {
+  const admin = await createUser();
+  const customer = await createUser();
+  const productId = `admin-rules-product-${randomUUID()}`;
+  const costId = `admin-rules-cost-${randomUUID()}`;
+
+  await seed(`administradores/${admin.email}`, {
+    role: { stringValue: 'admin' }
+  });
+  await seed(`productos/${productId}`, {
+    name: { stringValue: 'Producto administrable' },
+    activo: { booleanValue: true }
+  });
+  await seed(`costos_productos/${costId}`, {
+    costo: { integerValue: '250' }
+  });
+  await seed('config/local', {
+    abierto: { booleanValue: true }
+  });
+
+  await t.test('el administrador puede consultar su propio documento de rol', async () => {
+    const response = await request(`administradores/${admin.email}`, { token: admin.idToken });
+    assert.equal(response.status, 200);
+  });
+
+  await t.test('un cliente no puede consultar el documento de administrador ajeno', async () => {
+    const response = await request(`administradores/${admin.email}`, { token: customer.idToken });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el administrador puede leer el tablero completo de pedidos', async () => {
+    const response = await request('pedidos', { token: admin.idToken });
+    assert.equal(response.status, 200, await response.text());
+  });
+
+  await t.test('el administrador puede leer y actualizar costos privados', async () => {
+    const read = await request(`costos_productos/${costId}`, { token: admin.idToken });
+    assert.equal(read.status, 200);
+    const update = await request(`costos_productos/${costId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: { costo: { integerValue: '300' } } }
+    });
+    assert.equal(update.status, 200, await update.text());
+  });
+
+  await t.test('el administrador puede modificar el catálogo', async () => {
+    const response = await request(`productos/${productId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: {
+        name: { stringValue: 'Producto actualizado' },
+        activo: { booleanValue: true }
+      } }
+    });
+    assert.equal(response.status, 200, await response.text());
+  });
+
+  await t.test('un cliente no puede modificar el catálogo ni sus costos', async () => {
+    const productUpdate = await request(`productos/${productId}`, {
+      token: customer.idToken,
+      method: 'PATCH',
+      body: { fields: { name: { stringValue: 'Modificación no autorizada' } } }
+    });
+    assert.equal(productUpdate.status, 403);
+    const costUpdate = await request(`costos_productos/${costId}`, {
+      token: customer.idToken,
+      method: 'PATCH',
+      body: { fields: { costo: { integerValue: '1' } } }
+    });
+    assert.equal(costUpdate.status, 403);
+  });
+
+  await t.test('el administrador puede cambiar el estado del local y el cliente solo leerlo', async () => {
+    const customerRead = await request('config/local', { token: customer.idToken });
+    assert.equal(customerRead.status, 200);
+    const customerWrite = await request('config/local', {
+      token: customer.idToken,
+      method: 'PATCH',
+      body: { fields: { abierto: { booleanValue: false } } }
+    });
+    assert.equal(customerWrite.status, 403);
+    const adminWrite = await request('config/local', {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: { abierto: { booleanValue: true } } }
+    });
+    assert.equal(adminWrite.status, 200, await adminWrite.text());
+  });
+});
