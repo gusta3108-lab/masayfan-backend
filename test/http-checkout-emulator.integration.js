@@ -689,6 +689,36 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
+  await t.test('el endpoint de reintento rechaza incidencias ajenas a falta de stock antes de consultar el pago', async () => {
+    const incidentId = randomUUID();
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const incidentRef = firestore.collection('incidencias_pagos').doc(incidentId);
+    const paymentFetchesBefore = globalThis.__masayMockPaymentFetches;
+    await adminRef.set({ enabled: true });
+    await incidentRef.set({
+      type: 'approved_payment_validation_failed',
+      status: 'needs_admin_review',
+      paymentStatus: 'approved',
+      paymentId: '123456789',
+      externalReference: incidentId
+    });
+    try {
+      const response = await fetch(
+        baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + incidentId + '/retry-approved-payment',
+        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+      );
+      const body = await response.json();
+      assert.equal(response.status, 409, JSON.stringify(body));
+      assert.equal(body.success, false);
+      assert.equal(globalThis.__masayMockPaymentFetches, paymentFetchesBefore,
+        'una incidencia de validación nunca debe disparar el flujo de reintento de stock');
+      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+    } finally {
+      await adminRef.delete();
+      await incidentRef.delete();
+    }
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
