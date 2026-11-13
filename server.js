@@ -902,9 +902,25 @@ app.get('/api/admin/couriers', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
     await authenticatedAdmin(req);
-    const snapshot = await firestore.collection('repartidores').get();
-    const couriers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
-      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'es'));
+    const [snapshot, ordersSnapshot] = await Promise.all([
+      firestore.collection('repartidores').get(),
+      firestore.collection('pedidos').get()
+    ]);
+    const busyCourierIds = new Set();
+    ordersSnapshot.docs.forEach(orderDoc => {
+      const delivery = orderDoc.data().delivery || {};
+      if (['assigned', 'en_camino'].includes(String(delivery.status || '')) && delivery.courierId) {
+        busyCourierIds.add(String(delivery.courierId));
+      }
+    });
+    const couriers = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        availability: data.active === false ? 'inactive' : busyCourierIds.has(doc.id) ? 'busy' : 'available'
+      };
+    }).sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'es'));
     return res.json({ success: true, couriers });
   } catch (error) {
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para consultar repartidores.' });
@@ -955,11 +971,15 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
     const orderRef = firestore.collection('pedidos').doc(orderId);
     const courierRef = firestore.collection('repartidores').doc(courierId);
     const result = await firestore.runTransaction(async transaction => {
-      const [orderSnap, courierSnap] = await Promise.all([
-        transaction.get(orderRef), transaction.get(courierRef)
+      const assignedOrdersQuery = firestore.collection('pedidos').where('delivery.courierId', '==', courierId);
+      const [orderSnap, courierSnap, assignedOrdersSnap] = await Promise.all([
+        transaction.get(orderRef), transaction.get(courierRef), transaction.get(assignedOrdersQuery)
       ]);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       if (!courierSnap.exists || courierSnap.data().active === false) throw new Error('COURIER_NOT_AVAILABLE');
+      const alreadyBusy = assignedOrdersSnap.docs.some(doc => doc.id !== orderId
+        && ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')));
+      if (alreadyBusy) throw new Error('COURIER_BUSY');
       const order = orderSnap.data();
       if (isTestOrder(order)) throw new Error('TEST_ORDER');
       if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
@@ -986,6 +1006,7 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'COURIER_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'El repartidor no existe o está inactivo.' });
+    if (error.message === 'COURIER_BUSY') return res.status(409).json({ success: false, error: 'Este repartidor ya tiene una entrega pendiente. Elegí otro disponible.' });
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'El pedido debe estar marcado como listo antes de asignarlo.' });
     if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'La entrega ya fue completada.' });
