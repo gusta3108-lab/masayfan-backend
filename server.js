@@ -2038,6 +2038,182 @@ app.get('/api/courier/wallet', async (req, res) => {
   }
 });
 
+
+app.get('/api/courier/payment-profile', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const ref = firestore.collection('repartidores').doc(courierId);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data().active === false || String(snap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    const data = snap.data();
+    return res.json({ success: true, profile: {
+      name: data.name || '',
+      paymentAlias: data.paymentAlias || '',
+      paymentCbuCvu: data.paymentCbuCvu || '',
+      paymentHolder: data.paymentHolder || '',
+      paymentProvider: data.paymentProvider || '',
+      paymentVerified: data.paymentVerified === true
+    }});
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'Iniciá sesión nuevamente.' });
+    console.error('Error consultando perfil de cobro:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo cargar el perfil de cobro.' });
+  }
+});
+
+app.post('/api/courier/payment-profile', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const ref = firestore.collection('repartidores').doc(courierId);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data().active === false || String(snap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    const paymentAlias = String(req.body?.paymentAlias || '').trim().slice(0, 80);
+    const paymentCbuCvu = String(req.body?.paymentCbuCvu || '').replace(/\s+/g, '').slice(0, 30);
+    const paymentHolder = String(req.body?.paymentHolder || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    const paymentProvider = String(req.body?.paymentProvider || '').trim().slice(0, 80);
+    if ((!paymentAlias && !/^\d{22}$/.test(paymentCbuCvu)) || (paymentCbuCvu && !/^\d{22}$/.test(paymentCbuCvu)) || paymentHolder.length < 3) {
+      return res.status(400).json({ success: false, error: 'Ingresá un alias o CBU/CVU válido de 22 dígitos y el nombre del titular.' });
+    }
+    await ref.set({
+      paymentAlias, paymentCbuCvu, paymentHolder, paymentProvider,
+      paymentVerified: false,
+      paymentProfileUpdatedAt: FieldValue.serverTimestamp()
+    }, { merge: true });
+    return res.json({ success: true, paymentVerified: false });
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error guardando perfil de cobro:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo guardar el perfil de cobro.' });
+  }
+});
+
+app.get('/api/admin/courier-settlements', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const [couriersSnap, movementsSnap, payoutsSnap] = await Promise.all([
+      firestore.collection('repartidores').get(),
+      firestore.collection('courier_wallet_movements').get(),
+      firestore.collection('courier_payouts').get()
+    ]);
+    const rows = couriersSnap.docs.map(doc => {
+      const movements = movementsSnap.docs.filter(row => row.data().courierId === doc.id).map(row => row.data());
+      const payouts = payoutsSnap.docs.filter(row => row.data().courierId === doc.id).map(row => row.data());
+      return {
+        courierId: doc.id,
+        name: doc.data().name || '',
+        email: doc.data().email || '',
+        paymentAlias: doc.data().paymentAlias || '',
+        paymentCbuCvu: doc.data().paymentCbuCvu || '',
+        paymentHolder: doc.data().paymentHolder || '',
+        paymentProvider: doc.data().paymentProvider || '',
+        paymentVerified: doc.data().paymentVerified === true,
+        wallet: summarizeCourierWallet(movements, payouts)
+      };
+    }).filter(row => row.wallet.onlinePending > row.wallet.paidOut);
+    return res.json({ success: true, settlements: rows });
+  } catch (error) {
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para consultar liquidaciones.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error consultando liquidaciones:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudieron cargar las liquidaciones.' });
+  }
+});
+
+app.post('/api/admin/couriers/:courierId/payment-profile/verify', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const courierId = String(req.params.courierId || '');
+    if (!/^[a-f0-9]{64}$/.test(courierId)) return res.status(400).json({ success: false, error: 'Repartidor inválido.' });
+    const ref = firestore.collection('repartidores').doc(courierId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: 'El repartidor no existe.' });
+    const data = snap.data();
+    if (!data.paymentHolder || (!data.paymentAlias && !/^\d{22}$/.test(String(data.paymentCbuCvu || '')))) {
+      return res.status(409).json({ success: false, error: 'El repartidor debe completar titular y alias o CBU/CVU antes de verificar.' });
+    }
+    await ref.set({
+      paymentVerified: true,
+      paymentVerifiedAt: FieldValue.serverTimestamp(),
+      paymentVerifiedBy: String(admin.email).toLowerCase()
+    }, { merge: true });
+    return res.json({ success: true, paymentVerified: true });
+  } catch (error) {
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para verificar cuentas.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error verificando cuenta de repartidor:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo verificar la cuenta.' });
+  }
+});
+
+app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const courierId = String(req.params.courierId || '');
+    const amount = Math.round((Number(req.body?.amount) + Number.EPSILON) * 100) / 100;
+    const reference = String(req.body?.reference || '').trim().slice(0, 120);
+    if (!/^[a-f0-9]{64}$/.test(courierId) || !Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, error: 'Repartidor o importe de pago inválido.' });
+    }
+    const payoutRef = firestore.collection('courier_payouts').doc(crypto.randomUUID());
+    const result = await firestore.runTransaction(async transaction => {
+      const courierRef = firestore.collection('repartidores').doc(courierId);
+      const [courierSnap, movementsSnap] = await Promise.all([
+        transaction.get(courierRef),
+        transaction.get(firestore.collection('courier_wallet_movements').where('courierId', '==', courierId))
+      ]);
+      if (!courierSnap.exists) throw new Error('COURIER_NOT_FOUND');
+      const paymentProfile = courierSnap.data();
+      if (!paymentProfile.paymentHolder || (!paymentProfile.paymentAlias && !/^\d{22}$/.test(String(paymentProfile.paymentCbuCvu || '')))) {
+        throw new Error('PAYMENT_PROFILE_INCOMPLETE');
+      }
+      const onlinePending = movementsSnap.docs
+        .filter(doc => doc.data().status === 'online_pending')
+        .reduce((sum, doc) => sum + Math.max(0, Number(doc.data().amount) || 0), 0);
+      const paidOutTotal = Math.max(0, Number(paymentProfile.paidOutTotal) || 0);
+      const balanceToPay = Math.round(Math.max(0, onlinePending - paidOutTotal) * 100) / 100;
+      if (amount > balanceToPay) throw new Error('PAYOUT_EXCEEDS_BALANCE');
+      if (paymentProfile.paymentVerified !== true) {
+        transaction.update(courierRef, {
+          paymentVerified: true,
+          paymentVerifiedAt: FieldValue.serverTimestamp(),
+          paymentVerifiedBy: String(admin.email).toLowerCase()
+        });
+      }
+      transaction.update(courierRef, { paidOutTotal: Math.round((paidOutTotal + amount) * 100) / 100 });
+      transaction.create(payoutRef, {
+        courierId, amount, reference,
+        status: 'paid',
+        paidAt: FieldValue.serverTimestamp(),
+        paidBy: String(admin.email).toLowerCase(),
+        accountHolder: String(paymentProfile.paymentHolder || ''),
+        paymentAlias: String(paymentProfile.paymentAlias || ''),
+        paymentCbuCvu: String(paymentProfile.paymentCbuCvu || '')
+      });
+      return { balanceBefore: balanceToPay, balanceAfter: Math.round((balanceToPay - amount + Number.EPSILON) * 100) / 100 };
+    });
+    return res.status(201).json({ success: true, payoutId: payoutRef.id, amount, ...result });
+  } catch (error) {
+    if (error.message === 'COURIER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El repartidor no existe.' });
+    if (error.message === 'PAYMENT_PROFILE_INCOMPLETE') return res.status(409).json({ success: false, error: 'El repartidor debe cargar el titular y un alias o CBU/CVU válido antes de liquidar.' });
+    if (error.message === 'PAYOUT_EXCEEDS_BALANCE') return res.status(409).json({ success: false, error: 'El pago supera el saldo pendiente de liquidación.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para registrar pagos.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error registrando pago a repartidor:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo registrar el pago.' });
+  }
+});
+
 // Las rutas inexistentes de la API también responden JSON consistente.
 app.use((_req, res) => {
   return res.status(404).json({ success: false, error: 'La ruta solicitada no existe.' });
