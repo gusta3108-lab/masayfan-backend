@@ -968,9 +968,6 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
       const delivery = {
         courierId,
         courierName: courier.name,
-        courierEmail: courier.email,
-        courierPhone: courier.phone,
-        courierWhatsApp: courier.whatsapp,
         status: 'assigned',
         assignedAt: FieldValue.serverTimestamp(),
         assignedBy: String(admin.email).toLowerCase()
