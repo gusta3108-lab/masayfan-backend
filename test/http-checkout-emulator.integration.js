@@ -584,6 +584,52 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
+  await t.test('registra cobros en efectivo una sola vez y bloquea métodos o pedidos no elegibles', async () => {
+    const cashId = 'http-cash-paid-' + randomUUID();
+    const mpId = 'http-cash-mp-' + randomUUID();
+    const pendingId = 'http-cash-pending-' + randomUUID();
+    const testId = 'http-cash-test-' + randomUUID();
+    const refs = [cashId, mpId, pendingId, testId].map(id => firestore.collection('pedidos').doc(id));
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    await adminRef.set({ enabled: true });
+    await Promise.all([
+      refs[0].set({ status: 'finalizado', paymentMethod: 'efectivo', paymentStatus: 'pending', total: 900 }),
+      refs[1].set({ status: 'finalizado', paymentMethod: 'mercadopago', paymentStatus: 'approved', total: 900 }),
+      refs[2].set({ status: 'listo', paymentMethod: 'efectivo', paymentStatus: 'pending', total: 900 }),
+      refs[3].set({ esPrueba: true, status: 'finalizado', paymentMethod: 'prueba', paymentStatus: 'not_applicable' })
+    ]);
+    const headers = { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' };
+    const endpoint = id => baseUrl + '/api/admin/orders/' + id + '/cash-payment';
+    try {
+      const response = await fetch(endpoint(cashId), { method: 'POST', headers });
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.equal(body.paymentStatus, 'cash_received');
+      assert.equal(body.alreadyReceived, false);
+      const saved = (await refs[0].get()).data();
+      assert.equal(saved.paymentStatus, 'cash_received');
+      assert.equal(saved.paymentReceivedBy, customerEmail);
+      assert.ok(saved.paymentReceivedAt, 'debe guardar la fecha de cobro');
+      assert.ok(Number.isFinite(saved.paymentReceivedAt.toDate().getTime()));
+      const repeated = await fetch(endpoint(cashId), { method: 'POST', headers });
+      const repeatedBody = await repeated.json();
+      assert.equal(repeated.status, 200, JSON.stringify(repeatedBody));
+      assert.equal(repeatedBody.alreadyReceived, true, 'repetir la acción no debe duplicar el cobro');
+      const mpResponse = await fetch(endpoint(mpId), { method: 'POST', headers });
+      assert.equal(mpResponse.status, 409);
+      assert.equal((await refs[1].get()).data().paymentStatus, 'approved');
+      const pendingResponse = await fetch(endpoint(pendingId), { method: 'POST', headers });
+      assert.equal(pendingResponse.status, 409);
+      assert.equal((await refs[2].get()).data().paymentStatus, 'pending');
+      const testResponse = await fetch(endpoint(testId), { method: 'POST', headers });
+      assert.equal(testResponse.status, 409);
+      assert.equal((await refs[3].get()).data().paymentStatus, 'not_applicable');
+    } finally {
+      await Promise.all(refs.map(ref => ref.delete()));
+      await adminRef.delete();
+    }
+  });
+
   await t.test('un pedido de prueba recorre todas las etapas sin tocar inventario ni pagos', async () => {
     const testOrderId = 'http-test-order-' + randomUUID();
     const testProductId = 'http-test-product-' + randomUUID();
