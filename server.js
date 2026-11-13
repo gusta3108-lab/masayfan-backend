@@ -1273,6 +1273,9 @@ app.post('/api/courier/orders/:orderId/issue', async (req, res) => {
         'delivery.issueReportedBy': String(user.email).toLowerCase()
       });
     });
+    // Avisar a todos los dispositivos administrativos registrados; el mensaje
+    // identifica una incidencia y no se confunde con un pedido nuevo.
+    notifyAdminsNewOrder(orderId, { deliveryIssue: true, issueReason: reason });
     return res.json({ success: true, orderId, deliveryStatus: 'issue' });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
