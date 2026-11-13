@@ -1112,11 +1112,13 @@ app.get('/api/courier/orders', async (req, res) => {
     }
     const snapshot = await firestore.collection('pedidos')
       .where('delivery.courierId', '==', id).get();
-    const orders = snapshot.docs.map(doc => buildCourierOrder(doc.id, doc.data(), doc.data().delivery || {}))
+    const allAssignedOrders = snapshot.docs.map(doc => buildCourierOrder(doc.id, doc.data(), doc.data().delivery || {}));
+    const orders = allAssignedOrders
       .filter(order => ['assigned', 'en_camino'].includes(order.status))
       .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
+    const completedCount = allAssignedOrders.filter(order => order.status === 'delivered').length;
     const routeSegments = buildGoogleMapsRouteSegments(orders);
-    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, routeSegments });
+    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, completedCount, routeSegments });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
