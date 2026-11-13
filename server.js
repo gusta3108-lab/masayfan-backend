@@ -953,9 +953,12 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
     }
     const orderRef = firestore.collection('pedidos').doc(orderId);
     const courierRef = firestore.collection('repartidores').doc(courierId);
+    const assignedQuery = firestore.collection('pedidos').where('delivery.courierId', '==', courierId);
     const result = await firestore.runTransaction(async transaction => {
-      const [orderSnap, courierSnap] = await Promise.all([
-        transaction.get(orderRef), transaction.get(courierRef)
+      const [orderSnap, courierSnap, assignedSnapshot] = await Promise.all([
+        transaction.get(orderRef),
+        transaction.get(courierRef),
+        transaction.get(assignedQuery)
       ]);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       if (!courierSnap.exists || courierSnap.data().active === false) throw new Error('COURIER_NOT_AVAILABLE');
@@ -967,22 +970,40 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
         && req.body?.confirmReassignment !== true) {
         throw new Error('REASSIGNMENT_CONFIRMATION_REQUIRED');
       }
+      const existingOrders = assignedSnapshot.docs
+        .filter(doc => doc.id !== orderId
+          && ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')))
+        .map(doc => ({ orderId: doc.id, ...doc.data() }));
+      if (existingOrders.length >= 50) throw new Error('COURIER_ROUTE_LIMIT');
       const courier = courierSnap.data();
-      const delivery = {
-        courierId,
-        courierName: courier.name,
-        status: 'assigned',
-        assignedAt: FieldValue.serverTimestamp(),
-        assignedBy: String(admin.email).toLowerCase()
-      };
-      transaction.update(orderRef, { delivery });
-      return { order, courier, delivery };
+      const routeOrders = appendDeliveryStops(existingOrders, [{ orderId, ...order }]);
+      const existingIds = new Set(existingOrders.map(item => item.orderId));
+      const assignment = routeOrders.find(item => item.orderId === orderId);
+      routeOrders.forEach(item => {
+        if (existingIds.has(item.orderId)) {
+          transaction.update(firestore.collection('pedidos').doc(item.orderId), {
+            'delivery.routeOrder': item.routeOrder
+          });
+          return;
+        }
+        const delivery = {
+          courierId,
+          courierName: courier.name,
+          status: 'assigned',
+          routeOrder: item.routeOrder,
+          assignedAt: FieldValue.serverTimestamp(),
+          assignedBy: String(admin.email).toLowerCase()
+        };
+        transaction.update(orderRef, { delivery });
+      });
+      return { order, courier, delivery: { ...order.delivery, courierId, courierName: courier.name, status: 'assigned', routeOrder: assignment.routeOrder } };
     });
     const whatsappUrl = buildCourierWhatsAppUrl(result.courier, orderId, result.order);
     return res.json({
       success: true,
       orderId,
       deliveryStatus: 'assigned',
+      routeOrder: result.delivery.routeOrder,
       courier: { id: courierId, name: result.courier.name, phone: result.courier.phone },
       whatsappUrl
     });
@@ -992,7 +1013,8 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'El pedido debe estar marcado como listo antes de asignarlo.' });
     if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'La entrega ya fue completada.' });
-     if (error.message === 'REASSIGNMENT_CONFIRMATION_REQUIRED') return res.status(409).json({ success: false, error: 'El pedido ya está asignado. Confirmá la reasignación antes de cambiar de repartidor.' });
+    if (error.message === 'REASSIGNMENT_CONFIRMATION_REQUIRED') return res.status(409).json({ success: false, error: 'El pedido ya está asignado. Confirmá la reasignación antes de cambiar de repartidor.' });
+    if (error.message === 'COURIER_ROUTE_LIMIT') return res.status(409).json({ success: false, error: 'Este repartidor ya tiene 50 entregas activas. Completá o reasigná algunas antes de agregar más.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para asignar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error asignando repartidor:', error.message);
