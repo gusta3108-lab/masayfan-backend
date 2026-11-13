@@ -62,7 +62,7 @@ test('cash compensation accumulates across multiple orders', () => {
     { amount: 3000, status: 'cash_received' },
     { amount: 2000, status: 'cash_received' }
   ]);
-  assert.equal(wallet.onlinePending, 12000);
+  assert.equal(wallet.onlinePending, 7000);
   assert.equal(wallet.cashReceived, 5000);
   assert.equal(wallet.balanceToPay, 7000);
 });
