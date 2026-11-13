@@ -2174,24 +2174,37 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
         transaction.get(firestore.collection('courier_payouts').where('courierId', '==', courierId))
       ]);
       if (!courierSnap.exists) throw new Error('COURIER_NOT_FOUND');
-      if (courierSnap.data().paymentVerified !== true) throw new Error('PAYMENT_PROFILE_UNVERIFIED');
+      const paymentProfile = courierSnap.data();
+      if (!paymentProfile.paymentHolder || (!paymentProfile.paymentAlias && !/^\d{22}$/.test(String(paymentProfile.paymentCbuCvu || '')))) {
+        throw new Error('PAYMENT_PROFILE_INCOMPLETE');
+      }
       const wallet = summarizeCourierWallet(
         movementsSnap.docs.map(doc => doc.data()),
         payoutsSnap.docs.map(doc => doc.data())
       );
       if (amount > wallet.balanceToPay) throw new Error('PAYOUT_EXCEEDS_BALANCE');
+      if (paymentProfile.paymentVerified !== true) {
+        transaction.update(courierRef, {
+          paymentVerified: true,
+          paymentVerifiedAt: FieldValue.serverTimestamp(),
+          paymentVerifiedBy: String(admin.email).toLowerCase()
+        });
+      }
       transaction.create(payoutRef, {
         courierId, amount, reference,
         status: 'paid',
         paidAt: FieldValue.serverTimestamp(),
-        paidBy: String(admin.email).toLowerCase()
+        paidBy: String(admin.email).toLowerCase(),
+        accountHolder: String(paymentProfile.paymentHolder || ''),
+        paymentAlias: String(paymentProfile.paymentAlias || ''),
+        paymentCbuCvu: String(paymentProfile.paymentCbuCvu || '')
       });
       return { balanceBefore: wallet.balanceToPay, balanceAfter: Math.round((wallet.balanceToPay - amount + Number.EPSILON) * 100) / 100 };
     });
     return res.status(201).json({ success: true, payoutId: payoutRef.id, amount, ...result });
   } catch (error) {
     if (error.message === 'COURIER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El repartidor no existe.' });
-    if (error.message === 'PAYMENT_PROFILE_UNVERIFIED') return res.status(409).json({ success: false, error: 'Primero verificá manualmente los datos bancarios del repartidor.' });
+    if (error.message === 'PAYMENT_PROFILE_INCOMPLETE') return res.status(409).json({ success: false, error: 'El repartidor debe cargar el titular y un alias o CBU/CVU válido antes de liquidar.' });
     if (error.message === 'PAYOUT_EXCEEDS_BALANCE') return res.status(409).json({ success: false, error: 'El pago supera el saldo pendiente de liquidación.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para registrar pagos.' });
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
