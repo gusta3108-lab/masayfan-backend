@@ -6,6 +6,7 @@ const {
   courierDocumentId,
   normalizeCourier,
   canTransitionDeliveryStatus,
+  canCourierUpdateOrderStatus,
   buildCourierOrder,
   buildCourierWhatsAppUrl
 } = require('../lib/delivery');
@@ -38,6 +39,14 @@ test('delivery status only advances assigned -> on the way -> delivered', () => 
   assert.equal(canTransitionDeliveryStatus('en_camino', 'delivered'), true);
   assert.equal(canTransitionDeliveryStatus('assigned', 'delivered'), false);
   assert.equal(canTransitionDeliveryStatus('delivered', 'assigned'), false);
+});
+
+test('courier cannot advance delivery after an order leaves the ready state; repeated status is idempotent', () => {
+  assert.equal(canCourierUpdateOrderStatus('listo', 'assigned', 'en_camino'), true);
+  assert.equal(canCourierUpdateOrderStatus('listo', 'en_camino', 'delivered'), true);
+  assert.equal(canCourierUpdateOrderStatus('cancelado', 'assigned', 'en_camino'), false);
+  assert.equal(canCourierUpdateOrderStatus('rechazado', 'en_camino', 'delivered'), false);
+  assert.equal(canCourierUpdateOrderStatus('finalizado', 'delivered', 'delivered'), true);
 });
 
 test('courier order payload contains delivery data but not payment or customer account metadata', () => {
