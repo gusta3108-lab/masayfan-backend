@@ -7,6 +7,7 @@ const {
   normalizeCourier,
   canTransitionDeliveryStatus,
   canCourierUpdateOrderStatus,
+  hasActiveCourierDeliveries,
   buildCourierOrder,
   hasCompleteDeliveryCoordinates,
   buildCourierWhatsAppUrl
@@ -50,6 +51,13 @@ test('courier cannot advance delivery after an order leaves the ready state; rep
   assert.equal(canCourierUpdateOrderStatus('finalizado', 'delivered', 'delivered'), true);
 });
 
+test('courier cannot be deactivated while active deliveries remain assigned', () => {
+  assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'assigned' } }]), true);
+  assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'en_camino' } }]), true);
+  assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'delivered' } }]), false);
+  assert.equal(hasActiveCourierDeliveries([]), false);
+});
+
 test('courier order payload contains delivery data but not payment or customer account metadata', () => {
   const payload = buildCourierOrder('order-1', {
     clientName: 'Cliente',
@@ -79,6 +87,17 @@ test('WhatsApp link addresses only the courier and URL-encodes order details', (
   assert.match(message, /María/);
   assert.match(message, /Av\. Siempre Viva 123/);
   assert.match(message, /google\.com\/maps/);
+});
+
+test('WhatsApp map link omits null coordinates instead of routing to zero coordinates', () => {
+  const url = buildCourierWhatsAppUrl({ whatsapp: '5491112345678' }, 'order-null-coords', {
+    address: 'Calle sin geolocalizar',
+    deliveryLocation: { lat: null, lon: null },
+    items: []
+  });
+  const message = decodeURIComponent(url.split('?text=')[1]);
+  assert.doesNotMatch(message, /google\.com\/maps/);
+  assert.match(message, /Calle sin geolocalizar/);
 });
 
 test('delivery route is optimized by nearest straight-line stop when all addresses have coordinates', () => {

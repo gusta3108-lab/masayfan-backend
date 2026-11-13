@@ -19,7 +19,7 @@ const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 
 const app = express();
 app.use(cors({
@@ -922,6 +922,17 @@ app.post('/api/admin/couriers', async (req, res) => {
     const ref = firestore.collection('repartidores').doc(id);
     const previous = await ref.get();
     const active = req.body?.active === false ? false : true;
+    if (!active && previous.exists) {
+      const assignedOrders = await firestore.collection('pedidos')
+        .where('delivery.courierId', '==', id).get();
+      if (hasActiveCourierDeliveries(assignedOrders.docs.map(doc => doc.data()))) {
+        return res.status(409).json({
+          success: false,
+          code: 'COURIER_HAS_ACTIVE_DELIVERIES',
+          error: 'No se puede desactivar este repartidor mientras tenga entregas asignadas o en camino. Reasigná o completá esos pedidos primero.'
+        });
+      }
+    }
     await ref.set({
       ...courier,
       active,
