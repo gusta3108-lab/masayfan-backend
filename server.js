@@ -1255,6 +1255,9 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
         throw new Error('ORDER_NOT_DELIVERABLE');
       }
       if (delivery.status === nextStatus) return;
+      if (nextStatus === 'en_camino'
+        && ['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())
+        && delivery.storeCashStatus !== 'received') throw new Error('CASH_HANDOFF_REQUIRED');
       const update = {
         'delivery.status': nextStatus,
         ...(nextStatus === 'en_camino' ? { 'delivery.pickedUpAt': FieldValue.serverTimestamp() } : {
@@ -1263,11 +1266,26 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
           completedAt: new Date().toISOString()
         })
       };
+      if (nextStatus === 'delivered' && delivery.offerAccepted === true) {
+        const movementRef = firestore.collection('courier_wallet_movements').doc(orderId);
+        const movementSnap = await transaction.get(movementRef);
+        if (!movementSnap.exists) {
+          const earning = buildCourierEarning(order, delivery.courierFee);
+          transaction.create(movementRef, {
+            courierId, orderId, amount: earning.courierFee,
+            storeAmount: earning.storeAmount,
+            paymentMethod: earning.paymentMethod,
+            status: earning.paymentMethod === 'efectivo' ? 'cash_received' : 'online_pending',
+            createdAt: FieldValue.serverTimestamp()
+          });
+        }
+      }
       transaction.update(orderRef, update);
     });
     return res.json({ success: true, orderId, deliveryStatus: nextStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'CASH_HANDOFF_REQUIRED') return res.status(409).json({ success: false, error: 'Antes de salir, administración debe confirmar que recibió el importe de Masay correspondiente a este pedido.' });
     if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
     if (error.message === 'INVALID_DELIVERY_TRANSITION') return res.status(409).json({ success: false, error: 'Primero marcá el pedido en camino y luego como entregado.' });
     if (error.message === 'ORDER_NOT_DELIVERABLE') return res.status(409).json({ success: false, error: 'Este pedido ya no está disponible para reparto. Consultá con administración.' });
@@ -1799,6 +1817,44 @@ app.post('/api/webhook', async (req, res) => {
 
 
 
+app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const result = await firestore.runTransaction(async transaction => {
+      const snap = await transaction.get(orderRef);
+      if (!snap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = snap.data();
+      const delivery = order.delivery || {};
+      if (!['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())) throw new Error('CASH_ONLY');
+      if (delivery.offerAccepted !== true || !delivery.courierId || delivery.status !== 'assigned') throw new Error('DELIVERY_NOT_ASSIGNED');
+      if (delivery.storeCashStatus === 'received') return { alreadyReceived: true, amount: delivery.storeAmount };
+      const amount = Number(delivery.storeAmount);
+      if (!Number.isFinite(amount) || amount < 0) throw new Error('STORE_AMOUNT_INVALID');
+      transaction.update(orderRef, {
+        'delivery.storeCashStatus': 'received',
+        'delivery.storeCashAmount': amount,
+        'delivery.storeCashReceivedAt': FieldValue.serverTimestamp(),
+        'delivery.storeCashReceivedBy': String(admin.email).toLowerCase()
+      });
+      return { alreadyReceived: false, amount };
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'CASH_ONLY') return res.status(409).json({ success: false, error: 'Este procedimiento solo aplica a pedidos en efectivo.' });
+    if (error.message === 'DELIVERY_NOT_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido debe tener una oferta aceptada y estar asignado.' });
+    if (error.message === 'STORE_AMOUNT_INVALID') return res.status(409).json({ success: false, error: 'El importe que corresponde a Masay es inválido.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para confirmar cobros.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error confirmando entrega de efectivo a tienda:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo confirmar el cobro de Masay.' });
+  }
+});
+
 // OFERTAS DE REPARTO: el monto es individual por pedido y queda congelado al aceptar.
 app.post('/api/admin/orders/:orderId/courier-offer', async (req, res) => {
   try {
@@ -1865,7 +1921,7 @@ app.get('/api/courier/offers', async (req, res) => {
       || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
-    const snapshot = await firestore.collection('delivery_offers').where('courierId', '==', courierId).where('status', '==', 'pending').get();
+    const snapshot = await firestore.collection('delivery_offers').where('courierId', '==', courierId).get();
     const now = Date.now();
     const offers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(offer => Number(offer.expiresAtMillis || 0) > now)
@@ -1912,6 +1968,7 @@ app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
       const orderSnap = await transaction.get(orderRef);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
+      if (order.deliveryOfferId !== offerId || order.deliveryOfferStatus !== 'pending') throw new Error('OFFER_NOT_AVAILABLE');
       if (response === 'reject') {
         transaction.update(offerRef, { status: 'rejected', respondedAt: FieldValue.serverTimestamp() });
         transaction.update(orderRef, { deliveryOfferStatus: 'rejected' });
