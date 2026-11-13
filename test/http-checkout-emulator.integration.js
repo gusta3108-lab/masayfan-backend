@@ -550,6 +550,40 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal((await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity, 2);
   });
 
+  await t.test('registra la fecha de finalización de un pedido real y no altera su estado de pago', async () => {
+    const orderId = 'http-completed-order-' + randomUUID();
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    await adminRef.set({ enabled: true });
+    await orderRef.set({
+      status: 'listo',
+      paymentMethod: 'efectivo',
+      paymentStatus: 'pending',
+      inventoryCommitted: false,
+      total: 1250,
+      createdAt: new Date(Date.now() - 86400000).toISOString()
+    });
+    try {
+      const response = await fetch(baseUrl + '/api/admin/orders/' + orderId + '/status', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'finalizado' })
+      });
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.equal(body.status, 'finalizado');
+      const saved = (await orderRef.get()).data();
+      assert.equal(saved.status, 'finalizado');
+      assert.equal(saved.paymentStatus, 'pending', 'finalizar entrega no debe marcar el efectivo como cobrado automáticamente');
+      assert.ok(saved.completedAt, 'el pedido debe guardar la fecha de finalización');
+      assert.ok(Number.isFinite(Date.parse(saved.completedAt)), 'la fecha de finalización debe ser ISO válida');
+      assert.ok(Date.parse(saved.completedAt) > Date.parse(saved.createdAt), 'la finalización debe ser posterior a la creación');
+    } finally {
+      await orderRef.delete();
+      await adminRef.delete();
+    }
+  });
+
   await t.test('un pedido de prueba recorre todas las etapas sin tocar inventario ni pagos', async () => {
     const testOrderId = 'http-test-order-' + randomUUID();
     const testProductId = 'http-test-product-' + randomUUID();
