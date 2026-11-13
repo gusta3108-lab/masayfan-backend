@@ -116,6 +116,21 @@ test('route optimization reports when any stop lacks valid coordinates', () => {
   ]), false);
 });
 
+test('new courier batches append after existing active stops with unique route positions', () => {
+  const { appendDeliveryStops } = require('../lib/delivery');
+  const existing = [
+    { orderId: 'existing-2', delivery: { routeOrder: 2 } },
+    { orderId: 'existing-1', delivery: { routeOrder: 1 } }
+  ];
+  const additions = [
+    { orderId: 'new-far', deliveryLocation: { lat: -34.7, lon: -58.6 } },
+    { orderId: 'new-near', deliveryLocation: { lat: -34.61, lon: -58.41 } }
+  ];
+  const route = appendDeliveryStops(existing, additions);
+  assert.deepEqual(route.map(order => order.orderId), ['existing-1', 'existing-2', 'new-far', 'new-near']);
+  assert.deepEqual(route.map(order => order.routeOrder), [1, 2, 3, 4]);
+});
+
 test('route planning preserves selected order when coordinates are incomplete and splits large routes', () => {
   const { optimizeDeliveryStops, buildGoogleMapsRouteSegments } = require('../lib/delivery');
   const withoutCoordinates = optimizeDeliveryStops([
