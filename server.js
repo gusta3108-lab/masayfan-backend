@@ -982,6 +982,10 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
       if (isTestOrder(order)) throw new Error('TEST_ORDER');
       if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
       if (order.delivery?.status === 'delivered') throw new Error('DELIVERY_COMPLETED');
+      if (['assigned', 'en_camino'].includes(String(order.delivery?.status || ''))
+        && req.body?.confirmReassignment !== true) {
+        throw new Error('REASSIGNMENT_CONFIRMATION_REQUIRED');
+      }
       const courier = courierSnap.data();
       const delivery = {
         courierId,
@@ -1007,6 +1011,7 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'El pedido debe estar marcado como listo antes de asignarlo.' });
     if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'La entrega ya fue completada.' });
+     if (error.message === 'REASSIGNMENT_CONFIRMATION_REQUIRED') return res.status(409).json({ success: false, error: 'El pedido ya está asignado. Confirmá la reasignación antes de cambiar de repartidor.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para asignar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error asignando repartidor:', error.message);
@@ -1042,6 +1047,9 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
         if (isTestOrder(order)) throw new Error('TEST_ORDER');
         if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
         if (order.delivery?.status === 'delivered') throw new Error('DELIVERY_COMPLETED');
+        if (['assigned', 'en_camino'].includes(String(order.delivery?.status || ''))) {
+          throw new Error('ORDER_ALREADY_ASSIGNED');
+        }
         return { orderId: orderIds[index], ...order };
       });
       const optimized = optimizeDeliveryStops(candidates);
@@ -1093,6 +1101,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'Todos los pedidos deben estar marcados como listos antes de asignarlos.' });
     if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'Uno de los pedidos ya fue entregado.' });
+     if (error.message === 'ORDER_ALREADY_ASSIGNED') return res.status(409).json({ success: false, error: 'Uno o más pedidos ya están asignados. Usá la opción de reasignar individualmente para cambiar su responsable.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para asignar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error asignando lote de reparto:', error.message);
