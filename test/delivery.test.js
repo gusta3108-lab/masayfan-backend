@@ -8,6 +8,7 @@ const {
   canTransitionDeliveryStatus,
   canCourierUpdateOrderStatus,
   buildCourierOrder,
+  hasCompleteDeliveryCoordinates,
   buildCourierWhatsAppUrl
 } = require('../lib/delivery');
 
@@ -92,6 +93,18 @@ test('delivery route is optimized by nearest straight-line stop when all address
   assert.deepEqual(optimized.map(order => order.routeOrder), [1, 2, 3]);
   assert.match(buildGoogleMapsRouteUrl(optimized), /^https:\/\/www\.google\.com\/maps\/dir\/\?api=1/);
   assert.equal(buildGoogleMapsRouteSegments(optimized).length, 1);
+});
+
+test('route optimization reports when any stop lacks valid coordinates', () => {
+  assert.equal(hasCompleteDeliveryCoordinates([
+    { deliveryLocation: { lat: -34.6, lon: -58.4 } },
+    { deliveryLocation: { lat: -34.7, lon: -58.5 } }
+  ]), true);
+  assert.equal(hasCompleteDeliveryCoordinates([
+    { deliveryLocation: { lat: -34.6, lon: -58.4 } },
+    { address: 'Sin coordenadas' }
+  ]), false);
+  assert.equal(hasCompleteDeliveryCoordinates([]), false);
 });
 
 test('route planning preserves selected order when coordinates are incomplete and splits large routes', () => {
