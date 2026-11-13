@@ -16,6 +16,7 @@ const {
 } = require('mercadopago');
 
 const { isAllowedOrigin } = require('./lib/cors-origin');
+const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
@@ -73,27 +74,7 @@ function requireServices(res) {
   return requireFirebaseServices(res);
 }
 
-async function authenticatedUser(req) {
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Bearer ')) throw new Error('AUTH_REQUIRED');
-  // Rechaza también sesiones revocadas y usuarios deshabilitados.
-  // Los tokens inválidos o vencidos se normalizan para que todas las rutas respondan 401.
-  let decoded;
-  try {
-    decoded = await firebaseAuth.verifyIdToken(header.slice(7), true);
-  } catch (_error) {
-    throw new Error('AUTH_REQUIRED');
-  }
-  if (!decoded.email) throw new Error('AUTH_EMAIL_REQUIRED');
-  return decoded;
-}
-
-async function authenticatedAdmin(req) {
-  const user = await authenticatedUser(req);
-  const adminSnap = await firestore.collection('administradores').doc(user.email).get();
-  if (!adminSnap.exists) throw new Error('ADMIN_REQUIRED');
-  return user;
-}
+const { authenticatedUser, authenticatedAdmin } = createSessionAuthenticator({ firebaseAuth, firestore });
 
 function notifyAdminsNewOrder(orderId, order) {
   if (!firestore || !firebaseMessaging) return;
