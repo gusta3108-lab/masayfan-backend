@@ -2123,7 +2123,7 @@ app.get('/api/admin/courier-settlements', async (req, res) => {
         paymentVerified: doc.data().paymentVerified === true,
         wallet: summarizeCourierWallet(movements, payouts)
       };
-    }).filter(row => row.wallet.onlinePending > row.wallet.paidOut);
+    }).filter(row => row.wallet.balanceToPay > 0);
     return res.json({ success: true, settlements: rows });
   } catch (error) {
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para consultar liquidaciones.' });
@@ -2185,8 +2185,12 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
       const onlinePending = movementsSnap.docs
         .filter(doc => doc.data().status === 'online_pending')
         .reduce((sum, doc) => sum + Math.max(0, Number(doc.data().amount) || 0), 0);
+      const cashReceived = movementsSnap.docs
+        .filter(doc => doc.data().status === 'cash_received')
+        .reduce((sum, doc) => sum + Math.max(0, Number(doc.data().amount) || 0), 0);
       const paidOutTotal = Math.max(0, Number(paymentProfile.paidOutTotal) || 0);
-      const balanceToPay = Math.round(Math.max(0, onlinePending - paidOutTotal) * 100) / 100;
+      // El efectivo que el repartidor ya cobró compensa lo que Masay le debe por pedidos online.
+      const balanceToPay = Math.round(Math.max(0, onlinePending - cashReceived - paidOutTotal) * 100) / 100;
       if (amount > balanceToPay) throw new Error('PAYOUT_EXCEEDS_BALANCE');
       if (paymentProfile.paymentVerified !== true) {
         transaction.update(courierRef, {
