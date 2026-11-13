@@ -18,7 +18,7 @@ const {
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canTransitionDeliveryStatus, buildCourierOrder, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canTransitionDeliveryStatus, buildCourierOrder, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 
 const app = express();
 app.use(cors({
@@ -1061,7 +1061,8 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
       });
       return { courier, assignments };
     });
-    const routeUrl = buildGoogleMapsRouteUrl(result.assignments);
+    const routeSegments = buildGoogleMapsRouteSegments(result.assignments);
+    const routeUrl = routeSegments.map(segment => 'Paradas ' + segment.firstStop + ' a ' + segment.lastStop + ': ' + segment.url).join('\n');
     const whatsappOrders = result.assignments.map(order => ({
       orderId: order.orderId,
       clientName: order.clientName,
@@ -1079,7 +1080,8 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
         address: order.address,
         deliveryLocation: order.deliveryLocation || null
       })),
-      routeUrl,
+      routeUrl: routeSegments[0]?.url || null,
+      routeSegments,
       whatsappUrl
     });
   } catch (error) {
@@ -1110,8 +1112,8 @@ app.get('/api/courier/orders', async (req, res) => {
     const orders = snapshot.docs.map(doc => buildCourierOrder(doc.id, doc.data(), doc.data().delivery || {}))
       .filter(order => ['assigned', 'en_camino'].includes(order.status))
       .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
-    const routeUrl = buildGoogleMapsRouteUrl(orders);
-    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, routeUrl });
+    const routeSegments = buildGoogleMapsRouteSegments(orders);
+    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, routeSegments });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
