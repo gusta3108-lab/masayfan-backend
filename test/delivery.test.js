@@ -83,19 +83,30 @@ test('courier cannot be deactivated while active deliveries remain assigned', ()
   assert.equal(hasActiveCourierDeliveries([]), false);
 });
 
-test('courier order payload contains delivery data but not payment or customer account metadata', () => {
+test('courier order payload exposes only payment method and accepted delivery amounts, not customer account metadata', () => {
   const payload = buildCourierOrder('order-1', {
     clientName: 'Cliente',
     clientPhone: '111',
     address: 'Calle 1',
     total: 999,
+    paymentMethod: 'efectivo',
     paymentId: 'secret',
+    customerBankAccount: 'secret-account',
     items: [{ name: 'Torta', qty: 2, price: 400 }]
-  }, { courierId: 'courier-1', courierName: 'Ana', status: 'assigned' });
+  }, {
+    courierId: 'courier-1', courierName: 'Ana', status: 'assigned',
+    courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
+  });
   assert.deepEqual(Object.keys(payload).sort(), [
     'address', 'clientName', 'clientPhone', 'courierId', 'courierName',
-    'deliveryLocation', 'items', 'notes', 'orderId', 'routeOrder', 'status'
+    'delivery', 'deliveryLocation', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
   ].sort());
+  assert.equal(payload.paymentMethod, 'efectivo');
+  assert.deepEqual(payload.delivery, {
+    courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
+  });
+  assert.equal(payload.paymentId, undefined);
+  assert.equal(payload.customerBankAccount, undefined);
   assert.equal(payload.items[0].name, 'Torta');
 });
 
