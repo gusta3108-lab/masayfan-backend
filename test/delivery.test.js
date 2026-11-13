@@ -7,6 +7,7 @@ const {
   normalizeCourier,
   canTransitionDeliveryStatus,
   canCourierUpdateOrderStatus,
+  hasActiveCourierDeliveries,
   buildCourierOrder,
   hasCompleteDeliveryCoordinates,
   buildCourierWhatsAppUrl
@@ -48,6 +49,13 @@ test('courier cannot advance delivery after an order leaves the ready state; rep
   assert.equal(canCourierUpdateOrderStatus('cancelado', 'assigned', 'en_camino'), false);
   assert.equal(canCourierUpdateOrderStatus('rechazado', 'en_camino', 'delivered'), false);
   assert.equal(canCourierUpdateOrderStatus('finalizado', 'delivered', 'delivered'), true);
+});
+
+test('courier cannot be deactivated while active deliveries remain assigned', () => {
+  assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'assigned' } }]), true);
+  assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'en_camino' } }]), true);
+  assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'delivered' } }]), false);
+  assert.equal(hasActiveCourierDeliveries([]), false);
 });
 
 test('courier order payload contains delivery data but not payment or customer account metadata', () => {
