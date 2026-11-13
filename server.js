@@ -876,7 +876,10 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
         });
         transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString() });
       } else {
-        transaction.update(orderRef, { status: newStatus });
+        transaction.update(orderRef, {
+          status: newStatus,
+          ...(newStatus === 'finalizado' ? { completedAt: new Date().toISOString() } : {})
+        });
       }
     });
     return res.json({ success: true, order_id: orderId, status: newStatus });
