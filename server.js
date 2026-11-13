@@ -1045,6 +1045,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
         return { orderId: orderIds[index], ...order };
       });
       const optimized = optimizeDeliveryStops(candidates);
+      const batchId = crypto.randomUUID();
       const assignments = optimized.map((order, index) => ({
         ...order,
         routeOrder: index + 1
@@ -1055,7 +1056,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
           courierName: courier.name,
           status: 'assigned',
           routeOrder: order.routeOrder,
-          batchId: crypto.randomUUID(),
+          batchId,
           assignedAt: FieldValue.serverTimestamp(),
           assignedBy: String(admin.email).toLowerCase()
         };
@@ -1121,6 +1122,62 @@ app.get('/api/courier/orders', async (req, res) => {
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
     console.error('Error consultando entregas del repartidor:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudieron cargar tus entregas.' });
+  }
+});
+
+
+app.post('/api/courier/route/optimize', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const lat = Number(req.body?.origin?.lat);
+    const lon = Number(req.body?.origin?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return res.status(400).json({ success: false, error: 'No se recibió una ubicación válida.' });
+    }
+    const courierRef = firestore.collection('repartidores').doc(courierId);
+    const [courierSnap, assignedSnapshot] = await Promise.all([
+      courierRef.get(),
+      firestore.collection('pedidos').where('delivery.courierId', '==', courierId).get()
+    ]);
+    if (!courierSnap.exists || courierSnap.data().active === false
+      || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    const activeDocs = assignedSnapshot.docs.filter(doc =>
+      ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')));
+    if (!activeDocs.length) return res.json({ success: true, routeSegments: [], stopCount: 0 });
+    if (activeDocs.length > 50) return res.status(409).json({ success: false, error: 'Hay más de 50 entregas activas. Dividí el recorrido en dos tandas.' });
+    const refs = activeDocs.map(doc => doc.ref);
+    const optimized = optimizeDeliveryStops(activeDocs.map(doc => ({
+      orderId: doc.id,
+      ...doc.data(),
+      deliveryLocation: doc.data().deliveryLocation || null
+    })), { lat, lon });
+    await firestore.runTransaction(async transaction => {
+      const fresh = await Promise.all(refs.map(ref => transaction.get(ref)));
+      fresh.forEach((snap, index) => {
+        if (!snap.exists || snap.data().delivery?.courierId !== courierId
+          || !['assigned', 'en_camino'].includes(String(snap.data().delivery?.status || ''))) {
+          throw new Error('ROUTE_CHANGED');
+        }
+      });
+      optimized.forEach(order => {
+        transaction.update(firestore.collection('pedidos').doc(order.orderId), {
+          'delivery.routeOrder': order.routeOrder,
+          'delivery.routeOptimizedAt': FieldValue.serverTimestamp()
+        });
+      });
+    });
+    const routeSegments = buildGoogleMapsRouteSegments(optimized);
+    return res.json({ success: true, stopCount: optimized.length, routeSegments });
+  } catch (error) {
+    if (error.message === 'ROUTE_CHANGED') return res.status(409).json({ success: false, error: 'Tus pedidos cambiaron. Actualizá la lista e intentá nuevamente.' });
+    if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error optimizando recorrido:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo optimizar el recorrido.' });
   }
 });
 
