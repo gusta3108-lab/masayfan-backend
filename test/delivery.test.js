@@ -98,7 +98,7 @@ test('route planning preserves selected order when coordinates are incomplete an
     deliveryLocation: { lat: -34.6 + index / 100, lon: -58.4 + index / 100 }
   }));
   const segments = buildGoogleMapsRouteSegments(orders);
-  assert.deepEqual(segments.map(segment => [segment.firstStop, segment.lastStop]), [[1, 10], [11, 20], [21, 23]]);
+  assert.deepEqual(segments.map(segment => [segment.firstStop, segment.lastStop]), [[1, 4], [5, 8], [9, 12], [13, 16], [17, 20], [21, 23]]);
   assert.ok(segments.every(segment => segment.url.startsWith('https://www.google.com/maps/dir/')));
 });
 
