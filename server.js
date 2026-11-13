@@ -18,7 +18,7 @@ const {
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canTransitionDeliveryStatus, buildCourierOrder, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 
 const app = express();
 app.use(cors({
