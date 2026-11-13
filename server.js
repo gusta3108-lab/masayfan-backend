@@ -895,6 +895,50 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
   }
 });
 
+
+app.post('/api/admin/orders/:orderId/cash-payment', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) {
+      return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    }
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const result = await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      if (isTestOrder(order)) throw new Error('TEST_ORDER');
+      if (String(order.paymentMethod || 'efectivo').toLowerCase() !== 'efectivo') {
+        throw new Error('CASH_PAYMENT_ONLY');
+      }
+      if (!['finalizado', 'entregado'].includes(String(order.status || ''))) {
+        throw new Error('ORDER_NOT_COMPLETED');
+      }
+      if (order.paymentStatus === 'cash_received') return { alreadyReceived: true };
+      if (order.paymentStatus !== 'pending') throw new Error('PAYMENT_NOT_PENDING');
+      transaction.update(orderRef, {
+        paymentStatus: 'cash_received',
+        paymentReceivedAt: FieldValue.serverTimestamp(),
+        paymentReceivedBy: String(admin.email).toLowerCase()
+      });
+      return { alreadyReceived: false };
+    });
+    return res.json({ success: true, order_id: orderId, paymentStatus: 'cash_received', alreadyReceived: result.alreadyReceived });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no registran cobros.' });
+    if (error.message === 'CASH_PAYMENT_ONLY') return res.status(409).json({ success: false, error: 'Solo se puede registrar el cobro de pedidos en efectivo.' });
+    if (error.message === 'ORDER_NOT_COMPLETED') return res.status(409).json({ success: false, error: 'Primero debe finalizarse la entrega del pedido.' });
+    if (error.message === 'PAYMENT_NOT_PENDING') return res.status(409).json({ success: false, error: 'El estado de pago ya cambió y requiere verificación.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para registrar cobros.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error registrando cobro en efectivo:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo registrar el cobro en efectivo.' });
+  }
+});
+
 app.post('/api/admin/orders/:orderId/delete', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
