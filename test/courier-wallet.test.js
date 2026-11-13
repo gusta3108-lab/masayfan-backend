@@ -43,7 +43,7 @@ test('offers must be positive and cannot exceed the order total', () => {
   assert.throws(() => buildCourierOffer({ total: 0 }, 100, courierId), /ORDER_TOTAL_INVALID/);
 });
 
-test('wallet separates cash collected from online amount owed by Masay', () => {
+test('wallet offsets cash earnings against the amount Masay owes for online orders', () => {
   const wallet = summarizeCourierWallet([
     { amount: 4000, status: 'cash_received' },
     { amount: 4000, status: 'online_pending' },
@@ -52,8 +52,19 @@ test('wallet separates cash collected from online amount owed by Masay', () => {
   ], [{ amount: 2000, status: 'paid' }]);
   assert.deepEqual(wallet, {
     totalEarned: 12000, cashReceived: 4000, cashToCollect: 3000,
-    onlinePending: 8000, paidOut: 2000, balanceToPay: 6000
+    onlinePending: 8000, paidOut: 2000, balanceToPay: 2000
   });
+});
+
+test('cash compensation accumulates across multiple orders', () => {
+  const wallet = summarizeCourierWallet([
+    { amount: 12000, status: 'online_pending' },
+    { amount: 3000, status: 'cash_received' },
+    { amount: 2000, status: 'cash_received' }
+  ]);
+  assert.equal(wallet.onlinePending, 12000);
+  assert.equal(wallet.cashReceived, 5000);
+  assert.equal(wallet.balanceToPay, 7000);
 });
 
 test('offer cannot be accepted after it is no longer pending', () => {
