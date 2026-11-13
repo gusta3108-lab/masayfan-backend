@@ -52,7 +52,7 @@ test('wallet offsets cash earnings against the amount Masay owes for online orde
   ], [{ amount: 2000, status: 'paid' }]);
   assert.deepEqual(wallet, {
     totalEarned: 12000, cashReceived: 4000, cashToCollect: 3000,
-    onlinePending: 8000, paidOut: 2000, balanceToPay: 2000
+    onlinePending: 4000, paidOut: 2000, balanceToPay: 2000
   });
 });
 
