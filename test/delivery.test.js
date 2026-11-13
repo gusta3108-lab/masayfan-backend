@@ -89,6 +89,17 @@ test('WhatsApp link addresses only the courier and URL-encodes order details', (
   assert.match(message, /google\.com\/maps/);
 });
 
+test('WhatsApp map link omits null coordinates instead of routing to zero coordinates', () => {
+  const url = buildCourierWhatsAppUrl({ whatsapp: '5491112345678' }, 'order-null-coords', {
+    address: 'Calle sin geolocalizar',
+    deliveryLocation: { lat: null, lon: null },
+    items: []
+  });
+  const message = decodeURIComponent(url.split('?text=')[1]);
+  assert.doesNotMatch(message, /google\.com\/maps/);
+  assert.match(message, /Calle sin geolocalizar/);
+});
+
 test('delivery route is optimized by nearest straight-line stop when all addresses have coordinates', () => {
   const { optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments } = require('../lib/delivery');
   const orders = [
