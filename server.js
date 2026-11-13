@@ -1241,6 +1241,50 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
   }
 });
 
+app.post('/api/courier/orders/:orderId/issue', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const orderId = String(req.params.orderId || '');
+    const reason = String(req.body?.reason || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId) || reason.length < 5) {
+      return res.status(400).json({ success: false, error: 'Indicá el pedido y explicá brevemente el problema (mínimo 5 caracteres).' });
+    }
+    const courierSnap = await firestore.collection('repartidores').doc(courierId).get();
+    if (!courierSnap.exists || courierSnap.data().active === false
+      || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      const delivery = order.delivery || {};
+      if (delivery.courierId !== courierId) throw new Error('COURIER_NOT_ASSIGNED');
+      if (order.status !== 'listo' || !['assigned', 'en_camino'].includes(String(delivery.status || ''))) {
+        throw new Error('DELIVERY_NOT_ACTIVE');
+      }
+      transaction.update(orderRef, {
+        'delivery.status': 'issue',
+        'delivery.issueReason': reason,
+        'delivery.issueAt': FieldValue.serverTimestamp(),
+        'delivery.issueReportedBy': String(user.email).toLowerCase()
+      });
+    });
+    return res.json({ success: true, orderId, deliveryStatus: 'issue' });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
+    if (error.message === 'DELIVERY_NOT_ACTIVE') return res.status(409).json({ success: false, error: 'La entrega ya no está activa. Actualizá tus pedidos o consultá con administración.' });
+    if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error reportando incidencia de entrega:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo reportar el problema de entrega.' });
+  }
+});
+
 app.post('/api/admin/orders/:orderId/cash-payment', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
