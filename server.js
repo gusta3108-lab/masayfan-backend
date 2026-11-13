@@ -19,7 +19,7 @@ const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 
 const app = express();
 app.use(cors({
@@ -1015,13 +1015,20 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Seleccioná entre 1 y 25 pedidos válidos y un repartidor.' });
     }
     const courierRef = firestore.collection('repartidores').doc(courierId);
-    const orderRefs = orderIds.map(id => firestore.collection('pedidos').doc(id));
+    const ordersCollection = firestore.collection('pedidos');
+    const orderRefs = orderIds.map(id => ordersCollection.doc(id));
+    const assignedQuery = ordersCollection.where('delivery.courierId', '==', courierId);
     const result = await firestore.runTransaction(async transaction => {
-      const [courierSnap, ...orderSnaps] = await Promise.all([
-        transaction.get(courierRef), ...orderRefs.map(ref => transaction.get(ref))
+      const [courierSnap, assignedSnapshot, ...orderSnaps] = await Promise.all([
+        transaction.get(courierRef),
+        transaction.get(assignedQuery),
+        ...orderRefs.map(ref => transaction.get(ref))
       ]);
       if (!courierSnap.exists || courierSnap.data().active === false) throw new Error('COURIER_NOT_AVAILABLE');
       const courier = courierSnap.data();
+      const existingOrders = assignedSnapshot.docs
+        .filter(doc => ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')))
+        .map(doc => ({ orderId: doc.id, ...doc.data() }));
       const candidates = orderSnaps.map((snap, index) => {
         if (!snap.exists) throw new Error('ORDER_NOT_FOUND');
         const order = snap.data();
@@ -1033,13 +1040,17 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
         }
         return { orderId: orderIds[index], ...order };
       });
-      const optimized = optimizeDeliveryStops(candidates);
+      if (existingOrders.length + candidates.length > 50) throw new Error('COURIER_ROUTE_LIMIT');
+      const routeOrders = appendDeliveryStops(existingOrders, candidates);
+      const existingIds = new Set(existingOrders.map(order => order.orderId));
       const batchId = crypto.randomUUID();
-      const assignments = optimized.map((order, index) => ({
-        ...order,
-        routeOrder: index + 1
-      }));
-      assignments.forEach(order => {
+      const assignments = routeOrders.filter(order => !existingIds.has(order.orderId));
+      routeOrders.forEach(order => {
+        const orderRef = ordersCollection.doc(order.orderId);
+        if (existingIds.has(order.orderId)) {
+          transaction.update(orderRef, { 'delivery.routeOrder': order.routeOrder });
+          return;
+        }
         const delivery = {
           courierId,
           courierName: courier.name,
@@ -1049,13 +1060,13 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
           assignedAt: FieldValue.serverTimestamp(),
           assignedBy: String(admin.email).toLowerCase()
         };
-        transaction.update(firestore.collection('pedidos').doc(order.orderId), { delivery });
+        transaction.update(orderRef, { delivery });
       });
-      return { courier, assignments };
+      return { courier, assignments, routeOrders };
     });
-    const routeSegments = buildGoogleMapsRouteSegments(result.assignments);
+    const routeSegments = buildGoogleMapsRouteSegments(result.routeOrders);
     const routeUrl = routeSegments.map(segment => 'Paradas ' + segment.firstStop + ' a ' + segment.lastStop + ': ' + segment.url).join('\n');
-    const whatsappOrders = result.assignments.map(order => ({
+    const whatsappOrders = result.routeOrders.map(order => ({
       orderId: order.orderId,
       clientName: order.clientName,
       clientPhone: order.clientPhone,
@@ -1066,7 +1077,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
       success: true,
       courier: { id: courierId, name: result.courier.name },
       assignedOrderIds: result.assignments.map(order => order.orderId),
-      route: result.assignments.map(order => ({
+      route: result.routeOrders.map(order => ({
         orderId: order.orderId,
         routeOrder: order.routeOrder,
         address: order.address,
@@ -1074,6 +1085,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
       })),
       routeUrl: routeSegments[0]?.url || null,
       routeSegments,
+      activeRouteStopCount: result.routeOrders.length,
       whatsappUrl
     });
   } catch (error) {
@@ -1082,13 +1094,15 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'Todos los pedidos deben estar marcados como listos antes de asignarlos.' });
     if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'Uno de los pedidos ya fue entregado.' });
-     if (error.message === 'ORDER_ALREADY_ASSIGNED') return res.status(409).json({ success: false, error: 'Uno o más pedidos ya están asignados. Usá la opción de reasignar individualmente para cambiar su responsable.' });
+    if (error.message === 'ORDER_ALREADY_ASSIGNED') return res.status(409).json({ success: false, error: 'Uno o más pedidos ya están asignados. Usá la opción de reasignar individualmente para cambiar su responsable.' });
+    if (error.message === 'COURIER_ROUTE_LIMIT') return res.status(409).json({ success: false, error: 'Este repartidor ya tiene 50 entregas activas. Completá o reasigná algunas antes de agregar más.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para asignar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error asignando lote de reparto:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudo asignar el recorrido.' });
   }
 });
+
 
 app.get('/api/courier/orders', async (req, res) => {
   try {
