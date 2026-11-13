@@ -18,7 +18,7 @@ const {
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canTransitionDeliveryStatus, buildCourierOrder, buildCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canTransitionDeliveryStatus, buildCourierOrder, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 
 const app = express();
 app.use(cors({
@@ -971,15 +971,11 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
     const orderRef = firestore.collection('pedidos').doc(orderId);
     const courierRef = firestore.collection('repartidores').doc(courierId);
     const result = await firestore.runTransaction(async transaction => {
-      const assignedOrdersQuery = firestore.collection('pedidos').where('delivery.courierId', '==', courierId);
-      const [orderSnap, courierSnap, assignedOrdersSnap] = await Promise.all([
-        transaction.get(orderRef), transaction.get(courierRef), transaction.get(assignedOrdersQuery)
+      const [orderSnap, courierSnap] = await Promise.all([
+        transaction.get(orderRef), transaction.get(courierRef)
       ]);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       if (!courierSnap.exists || courierSnap.data().active === false) throw new Error('COURIER_NOT_AVAILABLE');
-      const alreadyBusy = assignedOrdersSnap.docs.some(doc => doc.id !== orderId
-        && ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')));
-      if (alreadyBusy) throw new Error('COURIER_BUSY');
       const order = orderSnap.data();
       if (isTestOrder(order)) throw new Error('TEST_ORDER');
       if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
@@ -1006,7 +1002,6 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'COURIER_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'El repartidor no existe o está inactivo.' });
-    if (error.message === 'COURIER_BUSY') return res.status(409).json({ success: false, error: 'Este repartidor ya tiene una entrega pendiente. Elegí otro disponible.' });
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'El pedido debe estar marcado como listo antes de asignarlo.' });
     if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'La entrega ya fue completada.' });
@@ -1014,6 +1009,89 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error asignando repartidor:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudo asignar el repartidor.' });
+  }
+});
+
+
+app.post('/api/admin/assign-courier-batch', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const courierId = String(req.body?.courierId || '');
+    const orderIds = Array.isArray(req.body?.orderIds)
+      ? [...new Set(req.body.orderIds.map(value => String(value || '')))]
+      : [];
+    if (!/^[a-f0-9]{64}$/.test(courierId)
+      || orderIds.length < 1 || orderIds.length > 25
+      || orderIds.some(id => !/^[A-Za-z0-9_-]{1,150}$/.test(id))) {
+      return res.status(400).json({ success: false, error: 'Seleccioná entre 1 y 25 pedidos válidos y un repartidor.' });
+    }
+    const courierRef = firestore.collection('repartidores').doc(courierId);
+    const orderRefs = orderIds.map(id => firestore.collection('pedidos').doc(id));
+    const result = await firestore.runTransaction(async transaction => {
+      const [courierSnap, ...orderSnaps] = await Promise.all([
+        transaction.get(courierRef), ...orderRefs.map(ref => transaction.get(ref))
+      ]);
+      if (!courierSnap.exists || courierSnap.data().active === false) throw new Error('COURIER_NOT_AVAILABLE');
+      const courier = courierSnap.data();
+      const candidates = orderSnaps.map((snap, index) => {
+        if (!snap.exists) throw new Error('ORDER_NOT_FOUND');
+        const order = snap.data();
+        if (isTestOrder(order)) throw new Error('TEST_ORDER');
+        if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
+        if (order.delivery?.status === 'delivered') throw new Error('DELIVERY_COMPLETED');
+        return { orderId: orderIds[index], ...order };
+      });
+      const optimized = optimizeDeliveryStops(candidates);
+      const assignments = optimized.map((order, index) => ({
+        ...order,
+        routeOrder: index + 1
+      }));
+      assignments.forEach(order => {
+        const delivery = {
+          courierId,
+          courierName: courier.name,
+          status: 'assigned',
+          routeOrder: order.routeOrder,
+          batchId: crypto.randomUUID(),
+          assignedAt: FieldValue.serverTimestamp(),
+          assignedBy: String(admin.email).toLowerCase()
+        };
+        transaction.update(firestore.collection('pedidos').doc(order.orderId), { delivery });
+      });
+      return { courier, assignments };
+    });
+    const routeUrl = buildGoogleMapsRouteUrl(result.assignments);
+    const whatsappOrders = result.assignments.map(order => ({
+      orderId: order.orderId,
+      clientName: order.clientName,
+      clientPhone: order.clientPhone,
+      address: order.address
+    }));
+    const whatsappUrl = buildBatchCourierWhatsAppUrl(result.courier, whatsappOrders, routeUrl);
+    return res.json({
+      success: true,
+      courier: { id: courierId, name: result.courier.name },
+      assignedOrderIds: result.assignments.map(order => order.orderId),
+      route: result.assignments.map(order => ({
+        orderId: order.orderId,
+        routeOrder: order.routeOrder,
+        address: order.address,
+        deliveryLocation: order.deliveryLocation || null
+      })),
+      routeUrl,
+      whatsappUrl
+    });
+  } catch (error) {
+    if (error.message === 'COURIER_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'El repartidor no existe o está inactivo.' });
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'Uno de los pedidos seleccionados ya no existe.' });
+    if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no se pueden asignar.' });
+    if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'Todos los pedidos deben estar marcados como listos antes de asignarlos.' });
+    if (error.message === 'DELIVERY_COMPLETED') return res.status(409).json({ success: false, error: 'Uno de los pedidos ya fue entregado.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para asignar pedidos.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error asignando lote de reparto:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo asignar el recorrido.' });
   }
 });
 
@@ -1030,8 +1108,10 @@ app.get('/api/courier/orders', async (req, res) => {
     const snapshot = await firestore.collection('pedidos')
       .where('delivery.courierId', '==', id).get();
     const orders = snapshot.docs.map(doc => buildCourierOrder(doc.id, doc.data(), doc.data().delivery || {}))
-      .filter(order => ['assigned', 'en_camino'].includes(order.status));
-    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders });
+      .filter(order => ['assigned', 'en_camino'].includes(order.status))
+      .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
+    const routeUrl = buildGoogleMapsRouteUrl(orders);
+    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, routeUrl });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
