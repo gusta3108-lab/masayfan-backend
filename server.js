@@ -906,19 +906,21 @@ app.get('/api/admin/couriers', async (req, res) => {
       firestore.collection('repartidores').get(),
       firestore.collection('pedidos').get()
     ]);
-    const busyCourierIds = new Set();
+    const activeDeliveryCounts = new Map();
     ordersSnapshot.docs.forEach(orderDoc => {
       const delivery = orderDoc.data().delivery || {};
       if (['assigned', 'en_camino'].includes(String(delivery.status || '')) && delivery.courierId) {
-        busyCourierIds.add(String(delivery.courierId));
+        activeDeliveryCounts.set(String(delivery.courierId), (activeDeliveryCounts.get(String(delivery.courierId)) || 0) + 1);
       }
     });
     const couriers = snapshot.docs.map(doc => {
       const data = doc.data();
+      const activeDeliveryCount = activeDeliveryCounts.get(doc.id) || 0;
       return {
         id: doc.id,
         ...data,
-        availability: data.active === false ? 'inactive' : busyCourierIds.has(doc.id) ? 'busy' : 'available'
+        activeDeliveryCount,
+        availability: data.active === false ? 'inactive' : activeDeliveryCount > 0 ? 'busy' : 'available'
       };
     }).sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'es'));
     return res.json({ success: true, couriers });
