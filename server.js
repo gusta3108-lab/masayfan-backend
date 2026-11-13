@@ -2168,21 +2168,21 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
     const payoutRef = firestore.collection('courier_payouts').doc(crypto.randomUUID());
     const result = await firestore.runTransaction(async transaction => {
       const courierRef = firestore.collection('repartidores').doc(courierId);
-      const [courierSnap, movementsSnap, payoutsSnap] = await Promise.all([
+      const [courierSnap, movementsSnap] = await Promise.all([
         transaction.get(courierRef),
-        transaction.get(firestore.collection('courier_wallet_movements').where('courierId', '==', courierId)),
-        transaction.get(firestore.collection('courier_payouts').where('courierId', '==', courierId))
+        transaction.get(firestore.collection('courier_wallet_movements').where('courierId', '==', courierId))
       ]);
       if (!courierSnap.exists) throw new Error('COURIER_NOT_FOUND');
       const paymentProfile = courierSnap.data();
       if (!paymentProfile.paymentHolder || (!paymentProfile.paymentAlias && !/^\d{22}$/.test(String(paymentProfile.paymentCbuCvu || '')))) {
         throw new Error('PAYMENT_PROFILE_INCOMPLETE');
       }
-      const wallet = summarizeCourierWallet(
-        movementsSnap.docs.map(doc => doc.data()),
-        payoutsSnap.docs.map(doc => doc.data())
-      );
-      if (amount > wallet.balanceToPay) throw new Error('PAYOUT_EXCEEDS_BALANCE');
+      const onlinePending = movementsSnap.docs
+        .filter(doc => doc.data().status === 'online_pending')
+        .reduce((sum, doc) => sum + Math.max(0, Number(doc.data().amount) || 0), 0);
+      const paidOutTotal = Math.max(0, Number(paymentProfile.paidOutTotal) || 0);
+      const balanceToPay = Math.round(Math.max(0, onlinePending - paidOutTotal) * 100) / 100;
+      if (amount > balanceToPay) throw new Error('PAYOUT_EXCEEDS_BALANCE');
       if (paymentProfile.paymentVerified !== true) {
         transaction.update(courierRef, {
           paymentVerified: true,
@@ -2190,6 +2190,7 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
           paymentVerifiedBy: String(admin.email).toLowerCase()
         });
       }
+      transaction.update(courierRef, { paidOutTotal: Math.round((paidOutTotal + amount) * 100) / 100 });
       transaction.create(payoutRef, {
         courierId, amount, reference,
         status: 'paid',
@@ -2199,7 +2200,7 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
         paymentAlias: String(paymentProfile.paymentAlias || ''),
         paymentCbuCvu: String(paymentProfile.paymentCbuCvu || '')
       });
-      return { balanceBefore: wallet.balanceToPay, balanceAfter: Math.round((wallet.balanceToPay - amount + Number.EPSILON) * 100) / 100 };
+      return { balanceBefore: balanceToPay, balanceAfter: Math.round((balanceToPay - amount + Number.EPSILON) * 100) / 100 };
     });
     return res.status(201).json({ success: true, payoutId: payoutRef.id, amount, ...result });
   } catch (error) {
