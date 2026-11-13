@@ -20,6 +20,7 @@ const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, summarizeCourierWallet } = require('./lib/courier-wallet');
 
 const app = express();
 app.use(cors({
@@ -1254,6 +1255,9 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
         throw new Error('ORDER_NOT_DELIVERABLE');
       }
       if (delivery.status === nextStatus) return;
+      if (nextStatus === 'en_camino'
+        && ['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())
+        && delivery.storeCashStatus !== 'received') throw new Error('CASH_HANDOFF_REQUIRED');
       const update = {
         'delivery.status': nextStatus,
         ...(nextStatus === 'en_camino' ? { 'delivery.pickedUpAt': FieldValue.serverTimestamp() } : {
@@ -1262,11 +1266,26 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
           completedAt: new Date().toISOString()
         })
       };
+      if (nextStatus === 'delivered' && delivery.offerAccepted === true) {
+        const movementRef = firestore.collection('courier_wallet_movements').doc(orderId);
+        const movementSnap = await transaction.get(movementRef);
+        if (!movementSnap.exists) {
+          const earning = buildCourierEarning(order, delivery.courierFee);
+          transaction.create(movementRef, {
+            courierId, orderId, amount: earning.courierFee,
+            storeAmount: earning.storeAmount,
+            paymentMethod: earning.paymentMethod,
+            status: earning.paymentMethod === 'efectivo' ? 'cash_received' : 'online_pending',
+            createdAt: FieldValue.serverTimestamp()
+          });
+        }
+      }
       transaction.update(orderRef, update);
     });
     return res.json({ success: true, orderId, deliveryStatus: nextStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'CASH_HANDOFF_REQUIRED') return res.status(409).json({ success: false, error: 'Antes de salir, administración debe confirmar que recibió el importe de Masay correspondiente a este pedido.' });
     if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
     if (error.message === 'INVALID_DELIVERY_TRANSITION') return res.status(409).json({ success: false, error: 'Primero marcá el pedido en camino y luego como entregado.' });
     if (error.message === 'ORDER_NOT_DELIVERABLE') return res.status(409).json({ success: false, error: 'Este pedido ya no está disponible para reparto. Consultá con administración.' });
@@ -1796,6 +1815,228 @@ app.post('/api/webhook', async (req, res) => {
   }
 });
 
+
+
+app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const result = await firestore.runTransaction(async transaction => {
+      const snap = await transaction.get(orderRef);
+      if (!snap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = snap.data();
+      const delivery = order.delivery || {};
+      if (!['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())) throw new Error('CASH_ONLY');
+      if (delivery.offerAccepted !== true || !delivery.courierId || delivery.status !== 'assigned') throw new Error('DELIVERY_NOT_ASSIGNED');
+      if (delivery.storeCashStatus === 'received') return { alreadyReceived: true, amount: delivery.storeAmount };
+      const amount = Number(delivery.storeAmount);
+      if (!Number.isFinite(amount) || amount < 0) throw new Error('STORE_AMOUNT_INVALID');
+      transaction.update(orderRef, {
+        'delivery.storeCashStatus': 'received',
+        'delivery.storeCashAmount': amount,
+        'delivery.storeCashReceivedAt': FieldValue.serverTimestamp(),
+        'delivery.storeCashReceivedBy': String(admin.email).toLowerCase()
+      });
+      return { alreadyReceived: false, amount };
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'CASH_ONLY') return res.status(409).json({ success: false, error: 'Este procedimiento solo aplica a pedidos en efectivo.' });
+    if (error.message === 'DELIVERY_NOT_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido debe tener una oferta aceptada y estar asignado.' });
+    if (error.message === 'STORE_AMOUNT_INVALID') return res.status(409).json({ success: false, error: 'El importe que corresponde a Masay es inválido.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para confirmar cobros.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error confirmando entrega de efectivo a tienda:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo confirmar el cobro de Masay.' });
+  }
+});
+
+// OFERTAS DE REPARTO: el monto es individual por pedido y queda congelado al aceptar.
+app.post('/api/admin/orders/:orderId/courier-offer', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const orderId = String(req.params.orderId || '');
+    const courierId = String(req.body?.courierId || '');
+    const amount = Number(req.body?.amount);
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId) || !/^[a-f0-9]{64}$/.test(courierId)) {
+      return res.status(400).json({ success: false, error: 'Pedido o repartidor inválido.' });
+    }
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const courierRef = firestore.collection('repartidores').doc(courierId);
+    const offerRef = firestore.collection('delivery_offers').doc(crypto.randomUUID());
+    const result = await firestore.runTransaction(async transaction => {
+      const [orderSnap, courierSnap] = await Promise.all([transaction.get(orderRef), transaction.get(courierRef)]);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      if (!courierSnap.exists || courierSnap.data().active === false) throw new Error('COURIER_NOT_AVAILABLE');
+      const order = orderSnap.data();
+      if (isTestOrder(order)) throw new Error('TEST_ORDER');
+      if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
+      if (['assigned', 'en_camino', 'delivered'].includes(String(order.delivery?.status || ''))) throw new Error('ORDER_ALREADY_ASSIGNED');
+      const offer = buildCourierOffer(order, amount, courierId, admin.email);
+      const now = Date.now();
+      const expiresAt = Timestamp.fromMillis(now + 10 * 60 * 1000);
+      transaction.create(offerRef, {
+        ...offer, orderId, courierName: courierSnap.data().name || '',
+        address: String(order.address || ''),
+        clientName: String(order.clientName || ''),
+        paymentMethod: String(order.paymentMethod || 'efectivo'),
+        createdAt: FieldValue.serverTimestamp(),
+        expiresAt,
+        expiresAtMillis: now + 10 * 60 * 1000
+      });
+      transaction.update(orderRef, {
+        deliveryOfferId: offerRef.id,
+        deliveryOfferStatus: 'pending',
+        deliveryOfferExpiresAt: expiresAt
+      });
+      return { amount: offer.amount, storeAmount: offer.storeAmount, courierName: courierSnap.data().name || '' };
+    });
+    return res.status(201).json({ success: true, offerId: offerRef.id, ...result, expiresInSeconds: 600 });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'COURIER_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'El repartidor no existe o está inactivo.' });
+    if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no generan ofertas.' });
+    if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'El pedido debe estar listo antes de ofrecerlo.' });
+    if (error.message === 'ORDER_ALREADY_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido ya está asignado o entregado.' });
+    if (['ORDER_TOTAL_INVALID', 'COURIER_OFFER_INVALID'].includes(error.message)) return res.status(400).json({ success: false, error: 'El importe ofrecido debe ser mayor a cero y no superar el total del pedido.' });
+    if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para ofrecer pedidos.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error creando oferta de reparto:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo crear la oferta.' });
+  }
+});
+
+app.get('/api/courier/offers', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const courierSnap = await firestore.collection('repartidores').doc(courierId).get();
+    if (!courierSnap.exists || courierSnap.data().active === false
+      || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    const snapshot = await firestore.collection('delivery_offers').where('courierId', '==', courierId).get();
+    const now = Date.now();
+    const offers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(offer => Number(offer.expiresAtMillis || 0) > now)
+      .map(offer => ({
+        id: offer.id, orderId: offer.orderId, amount: offer.amount,
+        orderTotal: offer.orderTotal, address: offer.address,
+        clientName: offer.clientName, paymentMethod: offer.paymentMethod,
+        expiresAtMillis: offer.expiresAtMillis
+      }));
+    return res.json({ success: true, offers });
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus ofertas.' });
+    console.error('Error consultando ofertas:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudieron cargar las ofertas.' });
+  }
+});
+
+app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const offerId = String(req.params.offerId || '');
+    const response = String(req.body?.response || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(offerId) || !['accept', 'reject'].includes(response)) {
+      return res.status(400).json({ success: false, error: 'Oferta o respuesta inválida.' });
+    }
+    const courierRef = firestore.collection('repartidores').doc(courierId);
+    const offerRef = firestore.collection('delivery_offers').doc(offerId);
+    const result = await firestore.runTransaction(async transaction => {
+      const [courierSnap, offerSnap] = await Promise.all([transaction.get(courierRef), transaction.get(offerRef)]);
+      if (!courierSnap.exists || courierSnap.data().active === false
+        || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) throw new Error('COURIER_NOT_AVAILABLE');
+      if (!offerSnap.exists) throw new Error('OFFER_NOT_AVAILABLE');
+      const offer = offerSnap.data();
+      if (offer.courierId !== courierId || offer.status !== 'pending') throw new Error('OFFER_NOT_AVAILABLE');
+      if (Number(offer.expiresAtMillis || 0) <= Date.now()) {
+        transaction.update(offerRef, { status: 'expired', respondedAt: FieldValue.serverTimestamp() });
+        const expiredOrderRef = firestore.collection('pedidos').doc(String(offer.orderId));
+        transaction.update(expiredOrderRef, { deliveryOfferStatus: 'expired' });
+        throw new Error('OFFER_EXPIRED');
+      }
+      const orderRef = firestore.collection('pedidos').doc(String(offer.orderId));
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      if (order.deliveryOfferId !== offerId || order.deliveryOfferStatus !== 'pending') throw new Error('OFFER_NOT_AVAILABLE');
+      if (response === 'reject') {
+        transaction.update(offerRef, { status: 'rejected', respondedAt: FieldValue.serverTimestamp() });
+        transaction.update(orderRef, { deliveryOfferStatus: 'rejected' });
+        return { accepted: false };
+      }
+      if (['assigned', 'en_camino', 'delivered'].includes(String(order.delivery?.status || ''))) throw new Error('ORDER_ALREADY_ASSIGNED');
+      const assignedQuery = firestore.collection('pedidos').where('delivery.courierId', '==', courierId);
+      const assignedSnap = await transaction.get(assignedQuery);
+      const existing = assignedSnap.docs.filter(doc => ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')))
+        .map(doc => ({ orderId: doc.id, ...doc.data() }));
+      if (existing.length >= 50) throw new Error('COURIER_ROUTE_LIMIT');
+      const route = appendDeliveryStops(existing, [{ orderId: offer.orderId, ...order }]);
+      const assignedOrder = route.find(item => item.orderId === offer.orderId);
+      const frozen = acceptCourierOffer(order, offer);
+      transaction.update(offerRef, { status: 'accepted', respondedAt: FieldValue.serverTimestamp() });
+      existing.forEach(item => transaction.update(firestore.collection('pedidos').doc(item.orderId), { 'delivery.routeOrder': route.find(stop => stop.orderId === item.orderId).routeOrder }));
+      transaction.update(orderRef, {
+        delivery: {
+          courierId, courierName: courierSnap.data().name || '',
+          status: 'assigned', routeOrder: assignedOrder.routeOrder,
+          assignedAt: FieldValue.serverTimestamp(), assignedByOffer: offerId,
+          ...frozen
+        },
+        deliveryOfferStatus: 'accepted',
+        deliveryOfferAcceptedAt: FieldValue.serverTimestamp()
+      });
+      return { accepted: true, amount: frozen.courierFee, storeAmount: frozen.storeAmount, routeOrder: assignedOrder.routeOrder };
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    if (error.message === 'OFFER_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'La oferta ya no está disponible.' });
+    if (error.message === 'OFFER_EXPIRED') return res.status(409).json({ success: false, error: 'La oferta venció. Administración puede volver a ofrecer el pedido.' });
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido ya no existe.' });
+    if (error.message === 'ORDER_ALREADY_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido ya fue asignado a otro repartidor.' });
+    if (error.message === 'COURIER_NOT_AVAILABLE') return res.status(403).json({ success: false, error: 'Tu cuenta de repartidor no está habilitada.' });
+    if (error.message === 'COURIER_ROUTE_LIMIT') return res.status(409).json({ success: false, error: 'Ya tenés 50 entregas activas. Completá algunas antes de aceptar otra.' });
+    if (error.message === 'ORDER_TOTAL_INVALID' || error.message === 'COURIER_OFFER_INVALID') return res.status(409).json({ success: false, error: 'La oferta tiene un importe inválido.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error respondiendo oferta:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo responder la oferta.' });
+  }
+});
+
+app.get('/api/courier/wallet', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const courierSnap = await firestore.collection('repartidores').doc(courierId).get();
+    if (!courierSnap.exists || courierSnap.data().active === false
+      || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    const [movementsSnap, payoutsSnap] = await Promise.all([
+      firestore.collection('courier_wallet_movements').where('courierId', '==', courierId).get(),
+      firestore.collection('courier_payouts').where('courierId', '==', courierId).get()
+    ]);
+    const wallet = summarizeCourierWallet(
+      movementsSnap.docs.map(doc => doc.data()),
+      payoutsSnap.docs.map(doc => doc.data())
+    );
+    return res.json({ success: true, wallet });
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tu billetera.' });
+    console.error('Error consultando billetera:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo consultar la billetera.' });
+  }
+});
 
 // Las rutas inexistentes de la API también responden JSON consistente.
 app.use((_req, res) => {
