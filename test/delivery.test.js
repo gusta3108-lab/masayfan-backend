@@ -105,6 +105,15 @@ test('route optimization reports when any stop lacks valid coordinates', () => {
     { address: 'Sin coordenadas' }
   ]), false);
   assert.equal(hasCompleteDeliveryCoordinates([]), false);
+  assert.equal(hasCompleteDeliveryCoordinates([
+    { deliveryLocation: { lat: '', lon: '' } }
+  ]), false);
+  assert.equal(hasCompleteDeliveryCoordinates([
+    { deliveryLocation: { lat: null, lon: -58.4 } }
+  ]), false);
+  assert.equal(hasCompleteDeliveryCoordinates([
+    { deliveryLocation: { lat: ' ', lon: '-58.4' } }
+  ]), false);
 });
 
 test('route planning preserves selected order when coordinates are incomplete and splits large routes', () => {
