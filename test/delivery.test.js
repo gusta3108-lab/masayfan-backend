@@ -70,3 +70,47 @@ test('WhatsApp link addresses only the courier and URL-encodes order details', (
   assert.match(message, /Av\. Siempre Viva 123/);
   assert.match(message, /google\.com\/maps/);
 });
+
+test('delivery route is optimized by nearest straight-line stop when all addresses have coordinates', () => {
+  const { optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments } = require('../lib/delivery');
+  const orders = [
+    { orderId: 'far', address: 'Far', deliveryLocation: { lat: -34.7, lon: -58.6 } },
+    { orderId: 'near', address: 'Near', deliveryLocation: { lat: -34.61, lon: -58.41 } },
+    { orderId: 'middle', address: 'Middle', deliveryLocation: { lat: -34.65, lon: -58.5 } }
+  ];
+  const optimized = optimizeDeliveryStops(orders, { lat: -34.6, lon: -58.4 });
+  assert.deepEqual(optimized.map(order => order.orderId), ['near', 'middle', 'far']);
+  assert.deepEqual(optimized.map(order => order.routeOrder), [1, 2, 3]);
+  assert.match(buildGoogleMapsRouteUrl(optimized), /^https:\/\/www\.google\.com\/maps\/dir\/\?api=1/);
+  assert.equal(buildGoogleMapsRouteSegments(optimized).length, 1);
+});
+
+test('route planning preserves selected order when coordinates are incomplete and splits large routes', () => {
+  const { optimizeDeliveryStops, buildGoogleMapsRouteSegments } = require('../lib/delivery');
+  const withoutCoordinates = optimizeDeliveryStops([
+    { orderId: 'a', address: 'Calle A' },
+    { orderId: 'b', address: 'Calle B', deliveryLocation: { lat: -34.6, lon: -58.4 } }
+  ]);
+  assert.deepEqual(withoutCoordinates.map(order => order.orderId), ['a', 'b']);
+  const orders = Array.from({ length: 23 }, (_, index) => ({
+    orderId: String(index + 1),
+    address: 'Calle ' + (index + 1),
+    deliveryLocation: { lat: -34.6 + index / 100, lon: -58.4 + index / 100 }
+  }));
+  const segments = buildGoogleMapsRouteSegments(orders);
+  assert.deepEqual(segments.map(segment => [segment.firstStop, segment.lastStop]), [[1, 10], [11, 20], [21, 23]]);
+  assert.ok(segments.every(segment => segment.url.startsWith('https://www.google.com/maps/dir/')));
+});
+
+test('batch WhatsApp message contains all assigned stops and route links', () => {
+  const { buildBatchCourierWhatsAppUrl } = require('../lib/delivery');
+  const url = buildBatchCourierWhatsAppUrl({ whatsapp: '5491112345678' }, [
+    { orderId: 'A1', clientName: 'Ana', address: 'Calle Uno' },
+    { orderId: 'B2', clientName: 'Luis', address: 'Calle Dos' }
+  ], 'https://www.google.com/maps/dir/?api=1');
+  const message = decodeURIComponent(url.split('?text=')[1]);
+  assert.match(message, /Pedido A1/);
+  assert.match(message, /Pedido B2/);
+  assert.match(message, /Abrir ruta completa/);
+});
+
