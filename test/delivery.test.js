@@ -51,7 +51,7 @@ test('courier order payload contains delivery data but not payment or customer a
   }, { courierId: 'courier-1', courierName: 'Ana', status: 'assigned' });
   assert.deepEqual(Object.keys(payload).sort(), [
     'address', 'clientName', 'clientPhone', 'courierId', 'courierName',
-    'deliveryLocation', 'items', 'notes', 'orderId', 'status'
+    'deliveryLocation', 'items', 'notes', 'orderId', 'routeOrder', 'status'
   ].sort());
   assert.equal(payload.items[0].name, 'Torta');
 });
