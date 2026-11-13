@@ -36,6 +36,31 @@ test('courier profile validates contact data and international WhatsApp number',
   assert.throws(() => normalizeCourier({ name: 'Ana', email: 'a@b.com', phone: '123456', whatsapp: '123' }), /COURIER_WHATSAPP_INVALID/);
 });
 
+test('courier order view includes the accepted fee and cash handoff state', () => {
+  const result = buildCourierOrder('order-1', {
+    clientName: 'Ana',
+    paymentMethod: 'efectivo',
+    total: 20000,
+    items: []
+  }, {
+    courierId: 'courier-1',
+    courierFee: 4000,
+    storeAmount: 16000,
+    storeCashStatus: 'received',
+    offerAccepted: true,
+    status: 'assigned',
+    routeOrder: 1
+  });
+  assert.equal(result.paymentMethod, 'efectivo');
+  assert.equal(result.delivery.courierFee, 4000);
+  assert.equal(result.delivery.storeAmount, 16000);
+  assert.equal(result.delivery.storeCashStatus, 'received');
+  assert.equal(result.delivery.offerAccepted, true);
+  const missing = buildCourierOrder('order-2', {}, {});
+  assert.equal(missing.delivery.courierFee, null);
+  assert.equal(missing.delivery.storeCashStatus, '');
+});
+
 test('delivery status only advances assigned -> on the way -> delivered', () => {
   assert.equal(canTransitionDeliveryStatus('assigned', 'en_camino'), true);
   assert.equal(canTransitionDeliveryStatus('en_camino', 'delivered'), true);
