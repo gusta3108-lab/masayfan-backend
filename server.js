@@ -18,7 +18,7 @@ const {
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 
 const app = express();
 app.use(cors({
@@ -1161,11 +1161,13 @@ app.post('/api/courier/route/optimize', async (req, res) => {
     if (!activeDocs.length) return res.json({ success: true, routeSegments: [], stopCount: 0 });
     if (activeDocs.length > 50) return res.status(409).json({ success: false, error: 'Hay más de 50 entregas activas. Dividí el recorrido en dos tandas.' });
     const refs = activeDocs.map(doc => doc.ref);
-    const optimized = optimizeDeliveryStops(activeDocs.map(doc => ({
+    const routeOrders = activeDocs.map(doc => ({
       orderId: doc.id,
       ...doc.data(),
       deliveryLocation: doc.data().deliveryLocation || null
-    })), { lat, lon });
+    }));
+    const optimizationApplied = hasCompleteDeliveryCoordinates(routeOrders);
+    const optimized = optimizeDeliveryStops(routeOrders, { lat, lon });
     await firestore.runTransaction(async transaction => {
       const fresh = await Promise.all(refs.map(ref => transaction.get(ref)));
       fresh.forEach((snap, index) => {
@@ -1182,7 +1184,13 @@ app.post('/api/courier/route/optimize', async (req, res) => {
       });
     });
     const routeSegments = buildGoogleMapsRouteSegments(optimized);
-    return res.json({ success: true, stopCount: optimized.length, routeSegments });
+    return res.json({
+      success: true,
+      stopCount: optimized.length,
+      optimizationApplied,
+      optimizationReason: optimizationApplied ? null : 'missing_delivery_coordinates',
+      routeSegments
+    });
   } catch (error) {
     if (error.message === 'ROUTE_CHANGED') return res.status(409).json({ success: false, error: 'Tus pedidos cambiaron. Actualizá la lista e intentá nuevamente.' });
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
