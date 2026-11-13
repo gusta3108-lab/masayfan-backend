@@ -203,3 +203,37 @@ test('push test can be scoped to devices owned by the requesting administrator',
   assert.deepEqual(sentTokens, [tokenA]);
   assert.equal(result.tokenCount, 1);
 });
+
+
+test('test orders never send misleading new-order push notifications', async () => {
+  const testOrders = [
+    { esPrueba: true },
+    { testType: 'audio' },
+    { paymentMethod: 'prueba' }
+  ];
+
+  for (const order of testOrders) {
+    let firestoreRead = false;
+    let fcmCalled = false;
+    const result = await sendAdminOrderPushNotifications({
+      firestore: {
+        collection() {
+          firestoreRead = true;
+          throw new Error('A test order must not query push recipients.');
+        }
+      },
+      messaging: {
+        sendEachForMulticast: async () => {
+          fcmCalled = true;
+          return { successCount: 0, failureCount: 0, responses: [] };
+        }
+      },
+      orderId: 'test-order',
+      order
+    });
+
+    assert.deepEqual(result, { successCount: 0, failureCount: 0, tokenCount: 0 });
+    assert.equal(firestoreRead, false);
+    assert.equal(fcmCalled, false);
+  }
+});
