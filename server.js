@@ -1214,7 +1214,9 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
       const order = orderSnap.data();
       const delivery = order.delivery || {};
       if (delivery.courierId !== courierId) throw new Error('COURIER_NOT_ASSIGNED');
-      if (!canTransitionDeliveryStatus(String(delivery.status || ''), nextStatus)) throw new Error('INVALID_DELIVERY_TRANSITION');
+      if (!canCourierUpdateOrderStatus(String(order.status || ''), String(delivery.status || ''), nextStatus)) {
+        throw new Error('ORDER_NOT_DELIVERABLE');
+      }
       if (delivery.status === nextStatus) return;
       const update = {
         'delivery.status': nextStatus,
@@ -1231,6 +1233,7 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
     if (error.message === 'INVALID_DELIVERY_TRANSITION') return res.status(409).json({ success: false, error: 'Primero marcá el pedido en camino y luego como entregado.' });
+    if (error.message === 'ORDER_NOT_DELIVERABLE') return res.status(409).json({ success: false, error: 'Este pedido ya no está disponible para reparto. Consultá con administración.' });
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error actualizando entrega:', error.message);
