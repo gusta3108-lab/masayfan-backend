@@ -1959,10 +1959,14 @@ app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
       const offer = offerSnap.data();
       if (offer.courierId !== courierId || offer.status !== 'pending') throw new Error('OFFER_NOT_AVAILABLE');
       if (Number(offer.expiresAtMillis || 0) <= Date.now()) {
-        transaction.update(offerRef, { status: 'expired', respondedAt: FieldValue.serverTimestamp() });
         const expiredOrderRef = firestore.collection('pedidos').doc(String(offer.orderId));
-        transaction.update(expiredOrderRef, { deliveryOfferStatus: 'expired' });
-        throw new Error('OFFER_EXPIRED');
+        const expiredOrderSnap = await transaction.get(expiredOrderRef);
+        transaction.update(offerRef, { status: 'expired', respondedAt: FieldValue.serverTimestamp() });
+        if (expiredOrderSnap.exists && expiredOrderSnap.data().deliveryOfferId === offerId
+          && expiredOrderSnap.data().deliveryOfferStatus === 'pending') {
+          transaction.update(expiredOrderRef, { deliveryOfferStatus: 'expired' });
+        }
+        return { expired: true };
       }
       const orderRef = firestore.collection('pedidos').doc(String(offer.orderId));
       const orderSnap = await transaction.get(orderRef);
@@ -1997,6 +2001,7 @@ app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
       });
       return { accepted: true, amount: frozen.courierFee, storeAmount: frozen.storeAmount, routeOrder: assignedOrder.routeOrder };
     });
+    if (result.expired) return res.status(409).json({ success: false, error: 'La oferta venció. Administración puede volver a ofrecer el pedido.' });
     return res.json({ success: true, ...result });
   } catch (error) {
     if (error.message === 'OFFER_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'La oferta ya no está disponible.' });
