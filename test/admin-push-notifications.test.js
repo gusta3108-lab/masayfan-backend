@@ -83,6 +83,22 @@ test('new-order message contains only the order reference and concise display da
   assert.equal(message.webpush.fcmOptions.link, 'https://www.masayfantasias.com/');
 });
 
+test('delivery issue notifications are distinct from new-order notifications', () => {
+  const message = buildAdminOrderPushMessage('order-issue-9', {
+    deliveryIssue: true,
+    issueReason: 'El cliente no responde.'
+  });
+  assert.deepEqual(message.data, {
+    type: 'delivery_issue',
+    title: 'Incidencia en una entrega',
+    body: 'Pedido order-issue-9 · El cliente no responde.',
+    orderId: 'order-issue-9',
+    url: '/'
+  });
+  assert.equal(message.webpush.headers.Urgency, 'high');
+  assert.equal(message.webpush.fcmOptions.link, 'https://www.masayfantasias.com/');
+});
+
 test('push sender sends to registered devices and removes expired FCM tokens', async () => {
   const deleted = [];
   const docs = [
