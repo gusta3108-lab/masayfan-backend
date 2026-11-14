@@ -18,7 +18,6 @@ const {
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
-const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { saveCourierProfileSafely, markCourierAssignment } = require('./lib/courier-assignment-guard');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
@@ -106,26 +105,6 @@ function checkoutIdempotency(req, user, items, order, paymentMethod) {
     .digest('hex');
   return { ref: firestore.collection('checkout_requests').doc(documentId), requestHash };
 }
-const { stockRequirements, createInventoryService } = require('./lib/inventory');
-const inventoryService = createInventoryService({ getFirestore: () => firestore });
-const { reserveInventory, releasePendingInventory, completeInventorySale } = inventoryService;
-
-function stockErrorResponse(error, res) {
-  if (!String(error.message || '').startsWith('STOCK_INSUFFICIENT:')) return false;
-  const message = String(error.message);
-  const separator = message.lastIndexOf(':');
-  const productName = message.slice('STOCK_INSUFFICIENT:'.length, separator);
-  const available = message.slice(separator + 1);
-  res.status(409).json({
-    success: false,
-    code: 'STOCK_INSUFFICIENT',
-    error: 'Stock insuficiente de ' + productName + '. Solo quedan ' + available + ' unidades disponibles.',
-    available: Number(available)
-  });
-  return true;
-}
-
-
 async function priceCartItems(items) {
   if (!Array.isArray(items) || items.length < 1 || items.length > 30) {
     throw new Error('El carrito no es válido.');
@@ -167,13 +146,11 @@ async function priceCartItems(items) {
       name = String(banner.title || promoProductSnap.data().name || promoProductSnap.data().nombre || '').slice(0, 160);
       if (!(unitPrice > 0) || !name) throw new Error('Precio o nombre de promoción inválido.');
       itemId = 'promo_' + bannerSnap.id;
-      item.stockProductId = bannerSnap.data().productId;
     } else {
       if (!itemId || itemId.startsWith('banner_')) throw new Error('No se pudo identificar un producto del carrito.');
       const productSnap = await firestore.collection('productos').doc(itemId).get();
       if (!productSnap.exists) throw new Error('Uno de los productos ya no existe.');
       const product = productSnap.data();
-      item.stockProductId = itemId;
       if (product.activo === false) throw new Error('Uno de los productos no está disponible.');
       const basePrice = money(product.price ?? product.precio ?? 0);
       const discount = Number(product.discount || 0);
@@ -197,7 +174,6 @@ async function priceCartItems(items) {
     if (money(item.price) !== unitPrice) throw new Error('El precio de un producto cambió. Actualizá el carrito e intentá nuevamente.');
     pricedItems.push({
       id: itemId,
-      stockProductId: item.stockProductId || null,
       name,
       price: unitPrice,
       qty,
@@ -318,15 +294,17 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   let validationFailure = null;
   if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
     validationFailure = 'El importe o la moneda del pago no coincide con el pedido.';
-  } else if (!pending.preferenceId || !payment.preference_id || String(payment.preference_id) !== String(pending.preferenceId)) {
+  } else if (!pending.preferenceId || (payment.preference_id && String(payment.preference_id) !== String(pending.preferenceId))) {
+    // Mercado Pago puede omitir preference_id en el recurso Payment.
+    // La referencia externa única vincula el pago con este checkout; si MP sí
+    // informa preference_id, cualquier discrepancia sigue siendo un rechazo.
     validationFailure = 'La preferencia del pago no coincide con el pedido.';
   } else if (payment.metadata?.user_uid && String(payment.metadata.user_uid) !== String(pending.uid)) {
     validationFailure = 'La cuenta asociada al pago no coincide con el pedido.';
   }
   if (validationFailure) return recordApprovedPaymentValidationIncident(validationFailure, pending);
 
-  try {
-    let orderCreated = false;
+  let orderCreated = false;
     await firestore.runTransaction(async transaction => {
       orderCreated = false;
       const [freshPending, existingOrder, validationIncident] = await Promise.all([
@@ -342,19 +320,6 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
-      // An expired reservation cannot be converted into a sale after payment.
-      // The payment must be reconciled separately; never consume unreserved stock.
-      if (data.inventoryReleased === true && options.allowAvailableStockAfterReservationRelease !== true) {
-        throw new Error('RESERVATION_EXPIRED');
-      }
-      // Solo el endpoint administrativo de revisión puede consumir stock disponible
-      // después de que la reserva original haya sido liberada. La transacción vuelve
-      // a comprobar cantidad disponible y evita descontar dos veces.
-      await completeInventorySale(
-        transaction,
-        data.order.items,
-        data.inventoryReleased === true ? false : true
-      );
       transaction.set(orderRef, {
         ...data.order,
         userEmail: data.userEmail,
@@ -363,7 +328,6 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         paymentMethod: 'mercadopago',
         paymentId: String(paymentId),
         paymentStatus: 'approved',
-        inventoryCommitted: true,
         createdAt: new Date().toISOString()
       });
       transaction.delete(pendingRef);
@@ -372,185 +336,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     });
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
     return { verified: true, alreadyRegistered: false };
-  } catch (registrationError) {
-    // El pago ya fue validado directamente con Mercado Pago. Si la reserva venció
-    // y otro cliente consumió el stock, registrar una incidencia durable en vez
-    // de dejar el webhook reintentando sin que administración pueda verla.
-    if (!String(registrationError.message || '').startsWith('STOCK_INSUFFICIENT:')
-      && registrationError.message !== 'RESERVATION_EXPIRED') {
-      throw registrationError;
-    }
-    const incidentRef = firestore.collection('incidencias_pagos').doc(reference);
-    await firestore.runTransaction(async transaction => {
-      const [freshPending, existingOrder, incidentSnap] = await Promise.all([
-        transaction.get(pendingRef),
-        transaction.get(orderRef),
-        transaction.get(incidentRef)
-      ]);
-      if (existingOrder.exists) {
-        if (String(existingOrder.data().paymentId) !== String(paymentId)) {
-          throw new Error('La referencia ya fue utilizada por otro pago.');
-        }
-        return;
-      }
-      if (incidentSnap.exists) {
-        if (String(incidentSnap.data().paymentId) !== String(paymentId)) {
-          throw new Error('La incidencia ya está asociada a otro pago.');
-        }
-        return;
-      }
-      if (!freshPending.exists) throw new Error('No se encontró el pedido pendiente para registrar la incidencia.');
-      const data = freshPending.data();
-      transaction.create(incidentRef, {
-        type: 'approved_payment_stock_unavailable',
-        status: 'needs_admin_review',
-        externalReference: reference,
-        paymentId: String(paymentId),
-        paymentStatus: 'approved',
-        total: data.total,
-        currency: 'ARS',
-        uid: data.uid,
-        userEmail: data.userEmail,
-        order: data.order,
-        stockError: registrationError.message,
-        reservationReleased: data.inventoryReleased === true,
-        createdAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp()
-      });
-      transaction.update(pendingRef, {
-        paymentApprovedNeedsReview: true,
-        paymentApprovedAt: FieldValue.serverTimestamp(),
-        paymentId: String(paymentId),
-        paymentIncidentId: reference
-      });
-    });
-    return { verified: true, alreadyRegistered: false, needsAdminReview: true };
-  }
 }
-
-app.post('/api/internal/release-expired-inventory', async (req, res) => {
-  const expectedSecret = process.env.INVENTORY_CLEANUP_SECRET;
-  if (!expectedSecret || req.get('x-inventory-cleanup-secret') !== expectedSecret) {
-    return res.sendStatus(401);
-  }
-  if (!requireFirebaseServices(res)) return;
-  if (!mpClient || !mpToken) {
-    return res.status(503).json({ success: false, error: 'Mercado Pago no está configurado; no se liberaron reservas.' });
-  }
-  try {
-    const now = Timestamp.now();
-    const pendingCollection = firestore.collection('pagos_pendientes');
-    const pageSize = 100;
-    const maxPages = 10;
-    let cursor = null;
-    let released = 0;
-    let failed = 0;
-    let checked = 0;
-    let truncated = false;
-
-    // Paginar dentro de una ejecución evita que 100 documentos dañados al inicio
-    // bloqueen indefinidamente la liberación de reservas vencidas posteriores.
-    for (let page = 0; page < maxPages; page += 1) {
-      let query = pendingCollection
-        .where('expiresAt', '<=', now)
-        .orderBy('expiresAt')
-        .limit(pageSize);
-      if (cursor) query = query.startAfter(cursor);
-      const expired = await query.get();
-      if (expired.empty) break;
-
-      checked += expired.size;
-      for (const pendingDoc of expired.docs) {
-        cursor = pendingDoc;
-        if (pendingDoc.data().inventoryReleased === true) continue;
-        try {
-          // Incidencias de creación ambigua o pagos aprobados con datos inconsistentes
-          // requieren revisión; no se liberan automáticamente ni se reintentan a ciegas.
-          const pendingData = pendingDoc.data();
-          if (pendingData.paymentApprovedNeedsReview === true) continue;
-          // La expiración local no demuestra que Mercado Pago no haya aprobado
-          // el pago. Consultar siempre la API antes de liberar unidades reservadas.
-          const payments = await searchPaymentsByExternalReference({
-            accessToken: mpToken,
-            externalReference: pendingDoc.id
-          });
-          if (payments.length === 0) {
-            const expiresAt = pendingDoc.data().expiresAt?.toDate
-              ? pendingDoc.data().expiresAt.toDate().getTime()
-              : new Date(pendingDoc.data().expiresAt).getTime();
-            const indexingGraceMs = 30 * 60 * 1000;
-            // Payment Search can lag. Keep stock for a grace period after the
-            // preference expires before treating an empty result as definitive.
-            if (!Number.isFinite(expiresAt) || Date.now() - expiresAt < indexingGraceMs) continue;
-            if (await releasePendingInventory(pendingDoc.ref, { confirmedNotApproved: true })) released += 1;
-            continue;
-          }
-
-          const verifiedPayments = await Promise.all(payments.map(async result => {
-            if (!result.id) throw new Error('Mercado Pago devolvió un pago sin identificador.');
-            return new Payment(mpClient).get({ id: String(result.id) });
-          }));
-          if (verifiedPayments.some(payment => String(payment.external_reference || '') !== pendingDoc.id)) {
-            throw new Error('Mercado Pago devolvió un pago con referencia externa distinta.');
-          }
-
-          const approvedPayment = verifiedPayments.find(payment => payment.status === 'approved');
-          if (approvedPayment) {
-            const registration = await registerApprovedPayment(
-              approvedPayment.id,
-              pendingDoc.id,
-              null,
-              approvedPayment
-            );
-            if (!registration.verified && !registration.needsAdminReview) {
-              throw new Error('No se pudo completar la revisión del pago aprobado; se conserva la reserva.');
-            }
-            continue;
-          }
-
-          // Solo estados terminales explícitos permiten liberar. Pendiente,
-          // en proceso, devuelto, contracargo o cualquier estado desconocido
-          // conservan la reserva para revisión o una nueva consulta.
-          const allConfirmedNotApproved = verifiedPayments.every(payment =>
-            ['cancelled', 'rejected'].includes(String(payment.status || ''))
-          );
-          if (allConfirmedNotApproved
-            && await releasePendingInventory(pendingDoc.ref, { confirmedNotApproved: true })) {
-            released += 1;
-          }
-        } catch (cleanupError) {
-          failed += 1;
-          // Ante cualquier error de consulta, conservar stock y reportar la falla.
-          console.error('No se pudo verificar/liberar una reserva vencida:', pendingDoc.id, cleanupError.message);
-        }
-      }
-      if (expired.size < pageSize) break;
-
-      // Si se agotó el presupuesto de páginas, comprobar si quedan documentos.
-      // No informar éxito silencioso cuando todavía existe trabajo pendiente.
-      if (page === maxPages - 1) {
-        const remaining = await pendingCollection
-          .where('expiresAt', '<=', now)
-          .orderBy('expiresAt')
-          .startAfter(cursor)
-          .limit(1)
-          .get();
-        truncated = !remaining.empty;
-      }
-    }
-    return res.json({
-      success: failed === 0 && !truncated,
-      released,
-      failed,
-      checked,
-      maxPages,
-      truncated
-    });
-  } catch (error) {
-    console.error('Error liberando reservas vencidas:', error.message);
-    return res.status(500).json({ success: false, error: 'No se pudieron liberar las reservas vencidas.' });
-  }
-});
 
 app.get('/api/admin/payment-incidents', async (req, res) => {
   try {
@@ -598,35 +384,46 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
     if (incident.status === 'resolved') {
       return res.json({ success: true, alreadyResolved: true, message: 'La incidencia ya estaba resuelta.' });
     }
-    if (incident.type !== 'approved_payment_stock_unavailable'
+    const missingPreferenceOnly = incident.type === 'approved_payment_validation_failed'
+      && incident.reason === 'La preferencia del pago no coincide con el pedido.'
+      && Boolean(incident.expectedPreferenceId)
+      && !incident.receivedPreferenceId;
+    if ((incident.type !== 'approved_payment_stock_unavailable' && !missingPreferenceOnly)
       || incident.paymentStatus !== 'approved'
       || !/^\d{1,30}$/.test(String(incident.paymentId || ''))
       || !/^[0-9a-f-]{36}$/i.test(String(incident.externalReference || ''))) {
-      return res.status(409).json({ success: false, error: 'Solo se pueden reintentar pagos aprobados cuya única incidencia sea la falta de stock.' });
+      return res.status(409).json({ success: false, error: 'Esta incidencia no cumple los requisitos para revalidar un pago aprobado.' });
     }
 
-    // Vuelve a consultar y validar el pago en Mercado Pago. Si la reserva original
-    // ya venció, solo consume stock NO reservado y únicamente si sigue disponible.
+    // Vuelve a consultar el pago en Mercado Pago y valida sus datos antes de registrar el pedido.
     const result = await registerApprovedPayment(
       String(incident.paymentId),
       String(incident.externalReference),
       null,
       null,
-      { allowAvailableStockAfterReservationRelease: true }
+      {}
     );
     if (!result.verified || result.needsAdminReview) {
       return res.status(409).json({
         success: false,
         needsAdminReview: Boolean(result.needsAdminReview),
         error: result.needsAdminReview
-          ? 'El pago sigue aprobado, pero el inventario todavía no permite completar el pedido. La incidencia continúa abierta.'
+          ? 'El pago sigue aprobado, pero sus datos todavía requieren revisión. La incidencia continúa abierta.'
           : 'No se pudo validar el pago nuevamente con Mercado Pago. La incidencia continúa abierta.'
       });
     }
 
     await firestore.runTransaction(async transaction => {
-      const freshIncident = await transaction.get(incidentRef);
-      if (!freshIncident.exists) throw new Error('INCIDENT_NOT_FOUND');
+      const [freshIncident, registeredOrder] = await Promise.all([
+        transaction.get(incidentRef),
+        transaction.get(firestore.collection('pedidos').doc(String(incident.externalReference)))
+      ]);
+      // Validation incidents are removed atomically by registerApprovedPayment
+      // when it creates the order. Accept that only if the same payment is linked.
+      if (!freshIncident.exists) {
+        if (registeredOrder.exists && String(registeredOrder.data().paymentId) === String(incident.paymentId)) return;
+        throw new Error('INCIDENT_NOT_FOUND');
+      }
       const fresh = freshIncident.data();
       if (String(fresh.paymentId || '') !== String(incident.paymentId)
         || String(fresh.externalReference || '') !== String(incident.externalReference)) {
@@ -635,7 +432,7 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
       if (fresh.status !== 'resolved') {
         transaction.update(incidentRef, {
           status: 'resolved',
-          resolution: 'approved_payment_registered_after_stock_review',
+          resolution: 'approved_payment_registered_after_admin_revalidation',
           adminResolvedAt: FieldValue.serverTimestamp(),
           adminResolvedBy: admin.email,
           updatedAt: FieldValue.serverTimestamp()
@@ -897,41 +694,18 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
         }
         deliveryClosureUpdate.deliveryOfferStatus = 'cancelled';
       }
-      if (newStatus === 'rechazado'
-        && order.inventoryCommitted === true && order.inventoryRestored !== true) {
-        const requirements = stockRequirements(order.items || []);
-        const refs = requirements.map(item => firestore.collection('productos').doc(item.productId));
-        const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
-        requirements.forEach((item, index) => {
-          const snap = snapshots[index];
-          if (!snap.exists) throw new Error('No se puede restaurar el inventario: falta un producto asociado al pedido.');
-          const product = snap.data();
-          if (product.stockManaged !== true && !Object.prototype.hasOwnProperty.call(product, 'stockQuantity')) return;
-          const quantity = Number(product.stockQuantity ?? 0);
-          const reserved = Number(product.stockReserved ?? 0);
-          if (!Number.isSafeInteger(quantity) || quantity < 0
-            || !Number.isSafeInteger(reserved) || reserved < 0 || reserved > quantity
-            || !Number.isSafeInteger(item.qty) || item.qty < 1
-            || !Number.isSafeInteger(quantity + item.qty)) {
-            throw new Error('No se puede restaurar el inventario: las cantidades del producto son inválidas.');
-          }
-          transaction.update(refs[index], { stockQuantity: quantity + item.qty });
-        });
-        transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString(), ...deliveryClosureUpdate });
-      } else {
-        transaction.update(orderRef, {
-          status: newStatus,
-          ...(newStatus === 'finalizado' ? { completedAt: new Date().toISOString() } : {}),
-          ...deliveryClosureUpdate
-        });
-      }
+      transaction.update(orderRef, {
+        status: newStatus,
+        ...(newStatus === 'finalizado' ? { completedAt: new Date().toISOString() } : {}),
+        ...deliveryClosureUpdate
+      });
     });
     return res.json({ success: true, order_id: orderId, status: newStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'INVALID_TEST_ORDER_TRANSITION') return res.status(409).json({ success: false, error: 'La prueba ya fue resuelta o el estado solicitado no es válido.' });
     if (error.message === 'INVALID_STATUS_TRANSITION') return res.status(409).json({ success: false, error: 'Ese cambio de estado no está permitido. Los pedidos entregados o rechazados no se pueden reabrir ni rechazar nuevamente.' });
-    if (error.message === 'PAYMENT_REFUND_REQUIRED') return res.status(409).json({ success: false, error: 'Este pedido fue cobrado con Mercado Pago. Primero realizá la devolución desde Mercado Pago y esperá que el pedido muestre DEVUELTO; recién entonces podrás rechazarlo y devolver el stock. Si figura CONTRACARGO, requiere revisión manual.' });
+    if (error.message === 'PAYMENT_REFUND_REQUIRED') return res.status(409).json({ success: false, error: 'Este pedido fue cobrado con Mercado Pago. Primero realizá la devolución desde Mercado Pago y esperá que el pedido muestre DEVUELTO; recién entonces podrás rechazarlo y Si figura CONTRACARGO, requiere revisión manual.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para modificar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error actualizando estado del pedido:', error.message);
@@ -1578,16 +1352,11 @@ app.post('/api/admin/orders/:orderId/delete', async (req, res) => {
     await firestore.runTransaction(async transaction => {
       const orderSnap = await transaction.get(orderRef);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
-      const order = orderSnap.data();
-      if (order.inventoryCommitted === true && order.inventoryRestored !== true) {
-        throw new Error('INVENTORY_NOT_RESTORED');
-      }
       transaction.delete(orderRef);
     });
     return res.json({ success: true, order_id: orderId });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
-    if (error.message === 'INVENTORY_NOT_RESTORED') return res.status(409).json({ success: false, error: 'Primero rechazá el pedido para devolver las unidades al inventario.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para eliminar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error eliminando pedido:', error.message);
@@ -1646,7 +1415,6 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         }
         if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
       }
-      await completeInventorySale(transaction, pricedItems, false);
       transaction.create(orderRef, {
         ...orderData,
         uid: user.uid,
@@ -1654,7 +1422,6 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         status: 'nuevo',
         paymentMethod: 'efectivo',
         paymentStatus: 'pending',
-        inventoryCommitted: true,
         createdAt: new Date().toISOString()
       });
       orderCreated = true;
@@ -1676,7 +1443,6 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     if (error.message === 'IDEMPOTENCY_KEY_INVALID') return res.status(400).json({ success: false, error: 'La clave del intento de compra no es válida.' });
     if (error.message === 'IDEMPOTENCY_KEY_REUSED') return res.status(409).json({ success: false, error: 'Este intento de compra ya fue utilizado con otros datos. Volvé a confirmar el pedido.' });
     if (error.message === 'IDEMPOTENCY_PROCESSING') return res.status(409).json({ success: false, error: 'El pedido ya se está registrando. Esperá unos segundos y revisá tus pedidos.' });
-    if (stockErrorResponse(error, res)) return;
     return res.status(authError ? 401 : 400).json({
       success: false,
       error: authError ? 'La sesión expiró. Volvé a iniciar sesión.' : error.message
@@ -1784,7 +1550,6 @@ app.post('/api/crear-preferencia', async (req, res) => {
         }
       }
       if (needsAdminReview) return;
-      await reserveInventory(transaction, pricedItems);
       transaction.create(pendingRef, {
         uid: user.uid,
         userEmail: user.email,
@@ -1792,8 +1557,6 @@ app.post('/api/crear-preferencia', async (req, res) => {
         preferenceId: null,
         initPoint: null,
         order: orderData,
-        inventoryReleased: false,
-        expiresAt: Timestamp.fromDate(reservationEnd),
         createdAt: FieldValue.serverTimestamp()
       });
       transaction.set(idempotency.ref, {
@@ -1884,8 +1647,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
               checkoutRequestId: idempotency.ref.id,
               total,
               currency: 'ARS',
-              stockReservationExpiresAt: reservationEnd.toISOString(),
-              error: String(preferenceError.message || 'Error desconocido').slice(0, 500),
+                     error: String(preferenceError.message || 'Error desconocido').slice(0, 500),
               createdAt: FieldValue.serverTimestamp()
             });
           }
@@ -1896,7 +1658,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
         });
       } catch (reviewError) {
         // Si Firestore tampoco responde, dejar el estado processing. El control
-        // de intentos antiguos lo convertirá en revisión sin liberar stock.
+        // Los intentos anteriores se conservan para revisión administrativa.
         console.error('No se pudo registrar la incidencia del checkout:', reviewError.message);
       }
       return res.status(409).json({
@@ -1912,7 +1674,6 @@ app.post('/api/crear-preferencia', async (req, res) => {
     if (error.message === 'IDEMPOTENCY_KEY_INVALID') return res.status(400).json({ success: false, error: 'La clave del intento de compra no es válida.' });
     if (error.message === 'IDEMPOTENCY_KEY_REUSED') return res.status(409).json({ success: false, error: 'Este intento de compra ya fue utilizado con otros datos. Volvé a confirmar el pedido.' });
     if (error.message === 'IDEMPOTENCY_PROCESSING') return res.status(409).json({ success: false, error: 'El pago ya se está preparando. Esperá unos segundos antes de volver a intentar.' });
-    if (stockErrorResponse(error, res)) return;
     res.status(authError ? 401 : 400).json({ success: false, error: authError ? 'La sesión expiró. Volvé a iniciar sesión.' : error.message });
   }
 });
@@ -1969,17 +1730,8 @@ app.post('/api/webhook', async (req, res) => {
     if (!reference) return res.sendStatus(200);
     if (payment.status !== 'approved') {
       const paymentStatus = String(payment.status || '');
-      if (['cancelled', 'rejected'].includes(paymentStatus)) {
-        // Mercado Pago confirmó que este intento no fue aprobado: ya es seguro
-        // liberar una reserva retenida por la creación ambigua de la preferencia.
-        await releasePendingInventory(
-          firestore.collection('pagos_pendientes').doc(reference),
-          { confirmedNotApproved: true }
-        );
-      }
       // Una devolución o contracargo posterior a la aprobación debe reflejarse
-      // en el pedido existente. No se repone stock automáticamente: el producto
-      // puede haber sido preparado o entregado y requiere decisión administrativa.
+      // en el pedido existente y requiere decisión administrativa.
       if (['refunded', 'charged_back'].includes(paymentStatus)) {
         await updateReversedPayment(paymentId, reference, paymentStatus);
       }
