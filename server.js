@@ -80,7 +80,32 @@ function requireServices(res) {
   return requireFirebaseServices(res);
 }
 
-const { authenticatedUser, authenticatedAdmin } = createSessionAuthenticator({ firebaseAuth, firestore });
+const { authenticatedUser, authenticatedVerifiedUser, authenticatedAdmin } = createSessionAuthenticator({ firebaseAuth, firestore });
+
+// Los privilegios administrativos y operativos requieren correo verificado.
+// Se cachea el token decodificado en req para evitar verificarlo dos veces en cada ruta.
+async function requireVerifiedRoleEmail(req, res, next) {
+  try {
+    await authenticatedVerifiedUser(req);
+    return next();
+  } catch (error) {
+    if (error.message === 'EMAIL_NOT_VERIFIED') {
+      return res.status(403).json({
+        success: false,
+        code: 'EMAIL_NOT_VERIFIED',
+        error: 'Verificá el correo de esta cuenta para acceder a las funciones de administración o reparto.'
+      });
+    }
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) {
+      return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    }
+    console.error('No se pudo validar el correo de una cuenta privilegiada:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo validar la sesión.' });
+  }
+}
+
+app.use('/api/admin', requireVerifiedRoleEmail);
+app.use('/api/courier', requireVerifiedRoleEmail);
 
 function notifyAdminsNewOrder(orderId, order) {
   if (!firestore || !firebaseMessaging) return;
