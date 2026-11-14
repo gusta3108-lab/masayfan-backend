@@ -51,6 +51,7 @@ test('courier order view includes the accepted fee and cash handoff state', () =
     status: 'assigned',
     routeOrder: 1
   });
+  assert.equal(Object.hasOwn(result, 'clientPhone'), false, 'courier payload must never expose customer phone');
   assert.equal(result.paymentMethod, 'efectivo');
   assert.equal(result.delivery.courierFee, 4000);
   assert.equal(result.delivery.storeAmount, 16000);
@@ -255,5 +256,6 @@ test('batch WhatsApp message contains all assigned stops and route links', () =>
   assert.match(message, /Pedido A1/);
   assert.match(message, /Pedido B2/);
   assert.match(message, /Abrir ruta completa/);
+  assert.doesNotMatch(message, /Teléfono:/);
 });
 
