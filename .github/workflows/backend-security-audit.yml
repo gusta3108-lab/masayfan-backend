@@ -56,8 +56,8 @@ jobs:
           node-version: 24.14.1
       - name: Record npm version
         run: npm --version
-      - name: Install dependencies as Render does, without lifecycle scripts
-        run: npm install --ignore-scripts --no-audit
+      - name: Install dependencies exactly as Render does
+        run: npm install
       - name: Audit exact production-main dependency tree
         run: |
           npm audit --json > npm-audit-main.json || true
