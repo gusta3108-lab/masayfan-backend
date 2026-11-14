@@ -11,13 +11,27 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/administradores/$(request.auth.token.email));
     }
 
+    function inventoryManaged(data) {
+      return data.keys().hasAny(['stockQuantity'])
+        || (data.keys().hasAny(['stockManaged']) && data.stockManaged == true);
+    }
+
+    // Until scheduled cleanup is proven operational, client writes cannot
+    // transition a product into or out of managed inventory.
+    function preservesInventoryManagementState() {
+      return inventoryManaged(resource.data) == inventoryManaged(request.resource.data);
+    }
+
     // Catálogo público: los visitantes pueden consultar, solo administración modifica.
     match /productos/{id} {
       allow read: if true;
-      allow create, update: if isAdmin();
-      // Productos que tuvieron inventario no se eliminan: pedidos aún activos
-      // pueden necesitar devolver unidades al rechazar una venta.
-      allow delete: if isAdmin() && !resource.data.keys().hasAny(['stockQuantity', 'stockReserved']);
+      allow create: if isAdmin() && !inventoryManaged(request.resource.data);
+      allow update: if isAdmin() && preservesInventoryManagementState();
+      // Products with managed inventory or reservation counters are retained:
+      // active orders may still need to restore units after a rejection.
+      allow delete: if isAdmin()
+        && !inventoryManaged(resource.data)
+        && !resource.data.keys().hasAny(['stockReserved']);
     }
 
     // Los costos de producción son privados y solo accesibles por administradores.
