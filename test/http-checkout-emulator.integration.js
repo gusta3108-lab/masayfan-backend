@@ -641,7 +641,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('productos').doc(noStockProductId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
-    if (customerEmail) await firestore.collection('administradores').doc(adminEmail).delete();
+    if (adminEmail) await firestore.collection('administradores').doc(adminEmail).delete();
     if (raceExternalReference) {
       await firestore.collection('pagos_pendientes').doc(raceExternalReference).delete();
     }
