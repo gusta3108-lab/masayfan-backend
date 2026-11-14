@@ -149,6 +149,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   );
   assert.equal(adminSignIn.status, 200, 'Auth Emulator debe emitir un token de contraseña para el administrador verificado');
   adminIdToken = (await adminSignIn.json()).idToken;
+  const verifiedAdminToken = await getAuth().verifyIdToken(adminIdToken);
+  assert.equal(verifiedAdminToken.email_verified, true, 'El token administrativo del emulador debe incluir email_verified=true');
 
   await firestore.collection('productos').doc(productId).set({
     name: 'Producto HTTP de prueba',
