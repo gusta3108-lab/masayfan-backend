@@ -44,6 +44,16 @@ test('the order owner can access their private chat by normalized account email'
   assert.deepEqual(participant, { role: 'customer', name: 'Ana Pérez', canSend: true });
 });
 
+test('participant display names never expose phone-like digit sequences', async () => {
+  const participant = await resolveOrderChatParticipant({
+    user: { email: 'cliente@example.com' },
+    order: { userEmail: 'cliente@example.com', clientName: 'Ana Pérez +54 9 11 2345-6789' },
+    firestore: fakeFirestore(),
+    courierDocumentId
+  });
+  assert.equal(participant.name, 'Ana Pérez');
+});
+
 test('a different customer cannot read or send messages in another order chat', async () => {
   await assert.rejects(
     resolveOrderChatParticipant({
