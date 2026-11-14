@@ -26,7 +26,7 @@ jobs:
       - name: Record npm version
         run: npm --version
       - name: Install dependencies without running package scripts
-        run: npm install --ignore-scripts --no-audit
+        run: npm install
       - name: Audit proposed dependency tree
         run: |
           npm audit --json > npm-audit.json || true
