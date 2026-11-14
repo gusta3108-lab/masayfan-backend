@@ -125,7 +125,7 @@ test('message authorization reads admin and courier membership inside the sendin
     }
   };
   const participant = await resolveOrderChatParticipant({
-    user: { email },
+    user: { email, email_verified: true },
     order: { delivery: { courierId: id } },
     firestore,
     courierDocumentId,
