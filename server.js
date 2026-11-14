@@ -85,6 +85,7 @@ const { authenticatedUser, authenticatedVerifiedUser, authenticatedAdmin } = cre
 // Los privilegios administrativos y operativos requieren correo verificado.
 // Se cachea el token decodificado en req para evitar verificarlo dos veces en cada ruta.
 async function requireVerifiedAdminEmail(req, res, next) {
+  if (!requireFirebaseServices(res)) return;
   try {
     const user = await authenticatedUser(req);
     const email = String(user.email).trim().toLowerCase();
@@ -108,6 +109,7 @@ async function requireVerifiedAdminEmail(req, res, next) {
 }
 
 async function requireVerifiedCourierEmail(req, res, next) {
+  if (!requireFirebaseServices(res)) return;
   try {
     const user = await authenticatedUser(req);
     const courierId = courierDocumentId(user.email);
