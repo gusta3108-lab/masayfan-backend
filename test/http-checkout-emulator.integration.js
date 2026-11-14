@@ -315,6 +315,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal((await firestore.collection('productos').doc(productId).get()).data().stockReserved, 1);
 
     globalThis.__masayMockPayment.transaction_amount = 100;
+    // Mercado Pago puede no incluir preference_id en Payment; la referencia
+    // externa única, el importe, la moneda y metadata.uid siguen verificándose.
+    delete globalThis.__masayMockPayment.preference_id;
     const webhook = await fetch(webhookUrl, {
       method: 'POST',
       headers: {
