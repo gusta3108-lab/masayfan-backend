@@ -141,7 +141,7 @@ test('courier order payload exposes only payment method and accepted delivery am
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
   });
   assert.deepEqual(Object.keys(payload).sort(), [
-    'address', 'clientName', 'clientPhone', 'courierId', 'courierName',
+    'address', 'clientName', 'courierId', 'courierName',
     'delivery', 'deliveryLocation', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
   ].sort());
   assert.equal(payload.paymentMethod, 'efectivo');
@@ -166,6 +166,7 @@ test('WhatsApp link addresses only the courier and URL-encodes order details', (
   assert.match(message, /María/);
   assert.match(message, /Av\. Siempre Viva 123/);
   assert.match(message, /google\.com\/maps/);
+  assert.doesNotMatch(message, /Teléfono:|112233/);
 });
 
 test('WhatsApp map link omits null coordinates instead of routing to zero coordinates', () => {
