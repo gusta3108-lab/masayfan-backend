@@ -134,17 +134,20 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   );
   assert.equal(adminSignup.status, 200, 'Auth Emulator debe crear el administrador de prueba');
   const adminSignupData = await adminSignup.json();
-  const verifyAdmin = await fetch(
+  const { getAuth } = require('firebase-admin/auth');
+  await getAuth().updateUser(adminSignupData.localId, { emailVerified: true });
+  const adminCustomToken = await getAuth().createCustomToken(adminSignupData.localId);
+  const adminSignIn = await fetch(
     'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
-      '/identitytoolkit.googleapis.com/v1/accounts:update?key=emulator-api-key',
+      '/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=emulator-api-key',
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ idToken: adminSignupData.idToken, emailVerified: true, returnSecureToken: true })
+      body: JSON.stringify({ token: adminCustomToken, returnSecureToken: true })
     }
   );
-  assert.equal(verifyAdmin.status, 200, 'Auth Emulator debe marcar el administrador como verificado');
-  adminIdToken = (await verifyAdmin.json()).idToken;
+  assert.equal(adminSignIn.status, 200, 'Auth Emulator debe emitir un token nuevo para el administrador verificado');
+  adminIdToken = (await adminSignIn.json()).idToken;
 
   await firestore.collection('productos').doc(productId).set({
     name: 'Producto HTTP de prueba',
