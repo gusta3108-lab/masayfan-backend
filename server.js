@@ -992,9 +992,12 @@ app.get('/api/courier/orders', async (req, res) => {
       .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
     const completedCount = allAssignedOrders.filter(order => order.status === 'delivered').length;
     const pickupAddress = String(process.env.STORE_PICKUP_ADDRESS || '').trim();
-    const pickupLat = Number(process.env.STORE_PICKUP_LAT);
-    const pickupLon = Number(process.env.STORE_PICKUP_LON);
-    const pickupCoordinatesValid = Number.isFinite(pickupLat) && Math.abs(pickupLat) <= 90
+    const pickupLatRaw = String(process.env.STORE_PICKUP_LAT || '').trim();
+    const pickupLonRaw = String(process.env.STORE_PICKUP_LON || '').trim();
+    const pickupLat = Number(pickupLatRaw);
+    const pickupLon = Number(pickupLonRaw);
+    const pickupCoordinatesValid = Boolean(pickupLatRaw && pickupLonRaw)
+      && Number.isFinite(pickupLat) && Math.abs(pickupLat) <= 90
       && Number.isFinite(pickupLon) && Math.abs(pickupLon) <= 180;
     const pickup = {
       address: pickupAddress || null,
@@ -1134,9 +1137,11 @@ app.post('/api/courier/route/optimize', async (req, res) => {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     const courierId = courierDocumentId(user.email);
-    const lat = Number(process.env.STORE_PICKUP_LAT);
-    const lon = Number(process.env.STORE_PICKUP_LON);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    const pickupLatRaw = String(process.env.STORE_PICKUP_LAT || '').trim();
+    const pickupLonRaw = String(process.env.STORE_PICKUP_LON || '').trim();
+    const lat = Number(pickupLatRaw);
+    const lon = Number(pickupLonRaw);
+    if (!pickupLatRaw || !pickupLonRaw || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
       return res.status(409).json({ success: false, error: 'La ubicación GPS del punto de retiro todavía no está configurada. Se mantiene el orden actual.' });
     }
     const courierRef = firestore.collection('repartidores').doc(courierId);
