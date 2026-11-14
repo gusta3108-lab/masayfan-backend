@@ -123,6 +123,7 @@ test('Firestore rules authorize the admin console without exposing admin data to
   const admin = await createUser();
   const customer = await createUser();
   const productId = `admin-rules-product-${randomUUID()}`;
+  const managedProductId = `admin-rules-managed-product-${randomUUID()}`;
   const costId = `admin-rules-cost-${randomUUID()}`;
 
   await seed(`administradores/${admin.email}`, {
@@ -131,6 +132,13 @@ test('Firestore rules authorize the admin console without exposing admin data to
   await seed(`productos/${productId}`, {
     name: { stringValue: 'Producto administrable' },
     activo: { booleanValue: true }
+  });
+  await seed(`productos/${managedProductId}`, {
+    name: { stringValue: 'Producto con inventario existente' },
+    activo: { booleanValue: true },
+    stockManaged: { booleanValue: true },
+    stockQuantity: { integerValue: '8' },
+    stockReserved: { integerValue: '2' }
   });
   await seed(`costos_productos/${costId}`, {
     costo: { integerValue: '250' }
@@ -190,6 +198,56 @@ test('Firestore rules authorize the admin console without exposing admin data to
       body: { fields: { costo: { integerValue: '1' } } }
     });
     assert.equal(costUpdate.status, 403);
+  });
+
+  await t.test('el administrador no puede crear productos con inventario administrado mientras está bloqueado', async () => {
+    const response = await request('productos', {
+      token: admin.idToken,
+      method: 'POST',
+      body: { fields: {
+        name: { stringValue: 'Producto con inventario no autorizado' },
+        activo: { booleanValue: true },
+        stockManaged: { booleanValue: true },
+        stockQuantity: { integerValue: '5' },
+        stockReserved: { integerValue: '0' }
+      } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el administrador no puede activar inventario por stockManaged en un producto existente', async () => {
+    const response = await request(`productos/${productId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: {
+        stockManaged: { booleanValue: true },
+        stockQuantity: { integerValue: '5' },
+        stockReserved: { integerValue: '0' }
+      } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el administrador no puede activar inventario agregando solo stockQuantity', async () => {
+    const response = await request(`productos/${productId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: { stockQuantity: { integerValue: '5' } } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el inventario que ya estaba administrado puede seguir actualizándose', async () => {
+    const response = await request(`productos/${managedProductId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: {
+        stockManaged: { booleanValue: true },
+        stockQuantity: { integerValue: '10' },
+        stockReserved: { integerValue: '2' }
+      } }
+    });
+    assert.equal(response.status, 200, await response.text());
   });
 
   await t.test('el administrador puede cambiar el estado del local y el cliente solo leerlo', async () => {
