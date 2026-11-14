@@ -1660,7 +1660,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
         });
       } catch (reviewError) {
         // Si Firestore tampoco responde, dejar el estado processing. El control
-        // de intentos antiguos lo convertirá en revisión sin liberar stock.
+        // Los intentos anteriores se conservan para revisión administrativa.
         console.error('No se pudo registrar la incidencia del checkout:', reviewError.message);
       }
       return res.status(409).json({
