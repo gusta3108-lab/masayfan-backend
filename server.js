@@ -1861,6 +1861,7 @@ app.post('/api/admin/orders/:orderId/courier-offer', async (req, res) => {
         ...offer, orderId, courierName: courierSnap.data().name || '',
         address: String(order.address || ''),
         clientName: String(order.clientName || ''),
+        displayOrderNumber: String(order.displayOrderNumber || ''),
         paymentMethod: String(order.paymentMethod || 'efectivo'),
         createdAt: FieldValue.serverTimestamp(),
         expiresAt,
@@ -1904,7 +1905,7 @@ app.get('/api/courier/offers', async (req, res) => {
     const offers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(offer => isCourierOfferVisible(offer, now))
       .map(offer => ({
-        id: offer.id, orderId: offer.orderId, amount: offer.amount,
+        id: offer.id, orderId: offer.orderId, displayOrderNumber: offer.displayOrderNumber || '', amount: offer.amount,
         orderTotal: offer.orderTotal, address: offer.address,
         clientName: offer.clientName, paymentMethod: offer.paymentMethod,
         expiresAtMillis: offer.expiresAtMillis
