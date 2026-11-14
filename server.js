@@ -20,7 +20,7 @@ const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
-const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, summarizeCourierWallet } = require('./lib/courier-wallet');
+const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet } = require('./lib/courier-wallet');
 
 const app = express();
 app.use(cors({
@@ -1317,7 +1317,6 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
     return res.json({ success: true, orderId, deliveryStatus: nextStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
-    if (error.message === 'CASH_HANDOFF_REQUIRED') return res.status(409).json({ success: false, error: 'Antes de salir, administración debe confirmar que recibió el importe de Masay correspondiente a este pedido.' });
     if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
     if (error.message === 'INVALID_DELIVERY_TRANSITION') return res.status(409).json({ success: false, error: 'Primero marcá el pedido en camino y luego como entregado.' });
     if (error.message === 'ORDER_NOT_DELIVERABLE') return res.status(409).json({ success: false, error: 'Este pedido ya no está disponible para reparto. Consultá con administración.' });
@@ -1862,9 +1861,7 @@ app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
       const order = snap.data();
       const delivery = order.delivery || {};
       if (!['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())) throw new Error('CASH_ONLY');
-      if (delivery.offerAccepted !== true || !delivery.courierId
-        || delivery.status !== 'delivered' || !['finalizado', 'entregado'].includes(String(order.status || ''))
-        || order.paymentStatus !== 'cash_received') throw new Error('DELIVERY_NOT_COMPLETED');
+      if (!canConfirmCourierCashSettlement(order)) throw new Error('DELIVERY_NOT_COMPLETED');
       if (delivery.storeCashStatus === 'received') return { alreadyReceived: true, amount: delivery.storeAmount };
       const amount = Number(delivery.storeAmount);
       if (!Number.isFinite(amount) || amount < 0) throw new Error('STORE_AMOUNT_INVALID');
