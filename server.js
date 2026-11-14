@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('node:crypto');
 const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder, isTestOrder } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
+const { reserveDisplayOrderNumber } = require('./lib/order-number');
 const cors = require('cors');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
@@ -320,8 +321,12 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
+      const displayOrderNumber = await reserveDisplayOrderNumber(
+        transaction, firestore.collection('secuencias').doc('pedidos'), FieldValue
+      );
       transaction.set(orderRef, {
         ...data.order,
+        displayOrderNumber,
         userEmail: data.userEmail,
         uid: data.uid,
         status: 'nuevo',
@@ -1415,7 +1420,9 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     const orderData = { clientName, clientPhone, address, notes, ...(deliveryLocation ? { deliveryLocation } : {}), items: pricedItems, total };
     const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'efectivo');
     const orderRef = firestore.collection('pedidos').doc();
+    const orderSequenceRef = firestore.collection('secuencias').doc('pedidos');
     let finalOrderId = orderRef.id;
+    let finalDisplayOrderNumber = '';
     let replayed = false;
     let orderCreated = false;
     await firestore.runTransaction(async transaction => {
@@ -1428,13 +1435,16 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         }
         if (previous.status === 'completed' && previous.orderId) {
           finalOrderId = previous.orderId;
+          finalDisplayOrderNumber = String(previous.displayOrderNumber || '');
           replayed = true;
           return;
         }
         if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
       }
+      finalDisplayOrderNumber = await reserveDisplayOrderNumber(transaction, orderSequenceRef, FieldValue);
       transaction.create(orderRef, {
         ...orderData,
+        displayOrderNumber: finalDisplayOrderNumber,
         uid: user.uid,
         userEmail: user.email,
         status: 'nuevo',
@@ -1448,12 +1458,13 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         paymentMethod: 'efectivo',
         requestHash: idempotency.requestHash,
         orderId: orderRef.id,
+        displayOrderNumber: finalDisplayOrderNumber,
         status: 'completed',
         createdAt: FieldValue.serverTimestamp()
       });
     });
     if (orderCreated) notifyAdminsNewOrder(finalOrderId, orderData);
-    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, replayed });
+    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, order_number: finalDisplayOrderNumber || null, replayed });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     if (error.message === 'ADMIN_CANNOT_PURCHASE') return res.status(403).json({ success: false, error: 'Las cuentas administradoras no pueden realizar compras.' });
