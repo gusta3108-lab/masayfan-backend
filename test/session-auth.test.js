@@ -4,8 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createSessionAuthenticator } = require('../lib/session-auth');
 
-function setup({ decoded = { uid: 'user-1', email: 'courier@example.com', email_verified: true }, verifyError = null, isAdmin = false } = {}) {
+function setup({ decoded = { uid: 'user-1', email: 'courier@example.com', email_verified: true }, verifyError = null, isAdmin = false, adminDocumentId = null } = {}) {
   const calls = [];
+  const adminDocLookups = [];
   const firebaseAuth = {
     async verifyIdToken(token, checkRevoked) {
       calls.push({ token, checkRevoked });
@@ -18,13 +19,13 @@ function setup({ decoded = { uid: 'user-1', email: 'courier@example.com', email_
       assert.equal(name, 'administradores');
       return {
         doc(email) {
-          assert.equal(email, String(decoded.email).trim().toLowerCase());
-          return { get: async () => ({ exists: isAdmin }) };
+          adminDocLookups.push(email);
+          return { get: async () => ({ exists: adminDocumentId ? email === adminDocumentId : isAdmin }) };
         }
       };
     }
   };
-  return { ...createSessionAuthenticator({ firebaseAuth, firestore }), calls };
+  return { ...createSessionAuthenticator({ firebaseAuth, firestore }), calls, adminDocLookups };
 }
 
 test('requires a Bearer token before verifying a session', async () => {
@@ -65,6 +66,16 @@ test('normalizes administrator email before looking up its role document', async
   const auth = setup({ decoded: { uid: 'admin-1', email: ' Admin@Example.com ', email_verified: true }, isAdmin: true });
   const user = await auth.authenticatedAdmin({ headers: { authorization: 'Bearer admin-token' } });
   assert.equal(user.email, ' Admin@Example.com ');
+});
+
+test('preserves access to legacy mixed-case administrator document IDs', async () => {
+  const auth = setup({
+    decoded: { uid: 'admin-1', email: 'Admin@Example.com', email_verified: true },
+    adminDocumentId: 'Admin@Example.com'
+  });
+  const user = await auth.authenticatedAdmin({ headers: { authorization: 'Bearer admin-token' } });
+  assert.equal(user.email, 'Admin@Example.com');
+  assert.deepEqual(auth.adminDocLookups, ['admin@example.com', 'Admin@Example.com']);
 });
 
 test('allows an administrator only when their administrator document exists', async () => {
