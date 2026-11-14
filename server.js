@@ -780,6 +780,12 @@ app.post('/api/admin/test-order', async (req, res) => {
       deliveryLocation: { lat: testLat, lon: testLon },
       location: { lat: testLat, lon: testLon },
       coordinates: { latitude: testLat, longitude: testLon },
+      // La vista admin y el serializador de entregas pueden leer el punto desde delivery.
+      delivery: {
+        status: 'not_assigned',
+        location: { lat: testLat, lon: testLon },
+        deliveryLocation: { lat: testLat, lon: testLon }
+      },
       latitude: testLat,
       longitude: testLon,
       locationLabel: 'Ubicación aleatoria de prueba · no es domicilio real',
@@ -796,7 +802,14 @@ app.post('/api/admin/test-order', async (req, res) => {
     // El pedido ficticio también debe probar el envío push a los dispositivos admin.
     // La alerta es asíncrona y no convierte esta prueba en una venta ni en un cobro.
     notifyAdminsNewOrder(orderRef.id, testOrder);
-    return res.status(201).json({ success: true, order_id: orderRef.id, esPrueba: true });
+    return res.status(201).json({
+      success: true,
+      order_id: orderRef.id,
+      esPrueba: true,
+      address: testAddress,
+      deliveryLocation: { lat: testLat, lon: testLon },
+      locationLabel: testOrder.locationLabel
+    });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
     const adminError = error.message === 'ADMIN_REQUIRED';
