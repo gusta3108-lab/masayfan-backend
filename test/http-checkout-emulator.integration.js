@@ -418,7 +418,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       const completed = (await orderRef.get()).data();
       assert.ok(completed.testResolvedAt);
       assert.ok(completed.testCompletedAt);
-      const product = (await productRef.get()).data();
 
       const invalid = await fetch(endpoint, {
         method: 'POST',
