@@ -386,7 +386,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('administradores').doc(adminEmail).set({ enabled: true });
 
     const endpoint = baseUrl + '/api/admin/orders/' + refundOrderId + '/status';
-    const adminHeaders = { ...headers, 'content-type': 'application/json' };
+    const adminHeaders = { ...headers, authorization: 'Bearer ' + adminIdToken, 'content-type': 'application/json' };
     const beforeRefund = await fetch(endpoint, {
       method: 'POST',
       headers: adminHeaders,
