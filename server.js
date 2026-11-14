@@ -20,7 +20,7 @@ const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
-const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet } = require('./lib/courier-wallet');
+const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
 
 const app = express();
@@ -2013,6 +2013,22 @@ app.post('/api/admin/orders/:orderId/courier-offer', async (req, res) => {
       if (isTestOrder(order)) throw new Error('TEST_ORDER');
       if (String(order.status || '') !== 'listo') throw new Error('ORDER_NOT_READY');
       if (['assigned', 'en_camino', 'delivered'].includes(String(order.delivery?.status || ''))) throw new Error('ORDER_ALREADY_ASSIGNED');
+      if (order.deliveryOfferStatus === 'pending' && order.deliveryOfferId) {
+        const previousOfferRef = firestore.collection('delivery_offers').doc(String(order.deliveryOfferId));
+        const previousOfferSnap = await transaction.get(previousOfferRef);
+        if (previousOfferSnap.exists) {
+          const previousOffer = previousOfferSnap.data();
+          if (previousOffer.status === 'pending' && Number(previousOffer.expiresAtMillis || 0) > Date.now()) {
+            throw new Error('OFFER_ALREADY_PENDING');
+          }
+          if (previousOffer.status === 'pending') {
+            transaction.update(previousOfferRef, {
+              status: 'expired',
+              respondedAt: FieldValue.serverTimestamp()
+            });
+          }
+        }
+      }
       const offer = buildCourierOffer(order, amount, courierId, admin.email);
       const now = Date.now();
       const expiresAt = Timestamp.fromMillis(now + 10 * 60 * 1000);
@@ -2039,6 +2055,7 @@ app.post('/api/admin/orders/:orderId/courier-offer', async (req, res) => {
     if (error.message === 'TEST_ORDER') return res.status(409).json({ success: false, error: 'Los pedidos de prueba no generan ofertas.' });
     if (error.message === 'ORDER_NOT_READY') return res.status(409).json({ success: false, error: 'El pedido debe estar listo antes de ofrecerlo.' });
     if (error.message === 'ORDER_ALREADY_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido ya está asignado o entregado.' });
+    if (error.message === 'OFFER_ALREADY_PENDING') return res.status(409).json({ success: false, error: 'Este pedido ya tiene una oferta pendiente. Esperá la respuesta o el vencimiento antes de ofrecerlo nuevamente.' });
     if (['ORDER_TOTAL_INVALID', 'COURIER_OFFER_INVALID'].includes(error.message)) return res.status(400).json({ success: false, error: 'El importe ofrecido debe ser mayor a cero y no superar el total del pedido.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para ofrecer pedidos.' });
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
@@ -2060,7 +2077,7 @@ app.get('/api/courier/offers', async (req, res) => {
     const snapshot = await firestore.collection('delivery_offers').where('courierId', '==', courierId).get();
     const now = Date.now();
     const offers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(offer => Number(offer.expiresAtMillis || 0) > now)
+      .filter(offer => isCourierOfferVisible(offer, now))
       .map(offer => ({
         id: offer.id, orderId: offer.orderId, amount: offer.amount,
         orderTotal: offer.orderTotal, address: offer.address,
