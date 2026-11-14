@@ -315,7 +315,22 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal((await firestore.collection('productos').doc(productId).get()).data().stockReserved, 1);
 
     globalThis.__masayMockPayment.transaction_amount = 100;
-    // Mercado Pago puede no incluir preference_id en Payment; la referencia
+    // Si Mercado Pago sí informa preference_id, una discrepancia real se rechaza.
+    globalThis.__masayMockPayment.preference_id = 'pref-emulator-different';
+    const mismatchedPreference = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedWebhookHeaders('987654321', 'emulator-wrong-preference', process.env.MP_WEBHOOK_SECRET)
+      },
+      body: webhookBody
+    });
+    assert.equal(mismatchedPreference.status, 200);
+    const preferenceIncident = await firestore.collection('incidencias_pagos').doc(validationIncidentId).get();
+    assert.equal(preferenceIncident.data().reason, 'La preferencia del pago no coincide con el pedido.');
+    assert.equal((await firestore.collection('pedidos').doc(body.external_reference).get()).exists, false);
+
+    // Mercado Pago puede omitir preference_id en Payment; la referencia
     // externa única, el importe, la moneda y metadata.uid siguen verificándose.
     delete globalThis.__masayMockPayment.preference_id;
     const webhook = await fetch(webhookUrl, {
