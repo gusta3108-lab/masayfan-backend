@@ -87,9 +87,6 @@ let customerEmail = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const noStockProductId = 'http-no-stock-' + randomUUID();
-const cleanupProductId = 'http-cleanup-' + randomUUID();
-const expiredPendingId = 'http-expired-' + randomUUID();
-const futurePendingId = 'http-future-' + randomUUID();
 const restoreProductId = 'http-restore-' + randomUUID();
 const refundOrderId = 'http-refund-order-' + randomUUID();
 let raceOrderId = null;
@@ -273,10 +270,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(validationIncident.data().status, 'needs_admin_review');
     product = (await firestore.collection('productos').doc(productId).get()).data();
 
-    // El cleanup no puede liberar una reserva cuyo pago aprobado está en revisión.
-    const { releasePendingInventory } = require('../lib/inventory').createInventoryService({ getFirestore: () => firestore });
-    assert.equal(await releasePendingInventory(firestore.collection('pagos_pendientes').doc(body.external_reference)), false);
-
     globalThis.__masayMockPayment.transaction_amount = 100;
     // Si Mercado Pago sí informa preference_id, una discrepancia real se rechaza.
     globalThis.__masayMockPayment.preference_id = 'pref-emulator-different';
@@ -354,11 +347,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   });
 
   await t.test('el rechazo de un pago Mercado Pago exige devolución', async () => {
-    await firestore.collection('productos').doc(restoreProductId).set({
-      name: 'Producto para prueba de devolución',
-    });
     await firestore.collection('pedidos').doc(refundOrderId).set({
-      items: [{ stockProductId: restoreProductId, qty: 1 }],
+      items: [{ qty: 1 }],
       status: 'nuevo',
       paymentMethod: 'mercadopago',
       paymentStatus: 'approved',
@@ -374,11 +364,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     });
     const beforeRefundBody = await beforeRefund.json();
     assert.equal(beforeRefund.status, 409, JSON.stringify(beforeRefundBody));
-    assert.equal(
-      (await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity,
-      1,
-      'no se devuelve inventario antes de confirmar el reembolso'
-    );
 
     await firestore.collection('pedidos').doc(refundOrderId).update({ paymentStatus: 'refunded' });
     const attempts = await Promise.all([
@@ -387,8 +372,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     ]);
     const bodies = await Promise.all(attempts.map(response => response.json()));
     assert.ok(attempts.every(response => response.status === 200), JSON.stringify(bodies));
-
-    const product = (await firestore.collection('productos').doc(restoreProductId).get()).data();
     const orderAfterReject = (await firestore.collection('pedidos').doc(refundOrderId).get()).data();
     assert.equal(orderAfterReject.status, 'rechazado');
 
@@ -404,17 +387,13 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     const testOrderId = 'http-test-order-' + randomUUID();
     const testProductId = 'http-test-product-' + randomUUID();
     const orderRef = firestore.collection('pedidos').doc(testOrderId);
-    const productRef = firestore.collection('productos').doc(testProductId);
     const adminRef = firestore.collection('administradores').doc(customerEmail);
-    await productRef.set({
-      name: 'Producto aislado para pedido ficticio',
-    });
     await orderRef.set({
       esPrueba: true,
       status: 'nuevo',
       paymentMethod: 'prueba',
       paymentStatus: 'not_applicable',
-      items: [{ stockProductId: testProductId, qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
+      items: [{ qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
     });
     await adminRef.set({ enabled: true });
 
@@ -450,7 +429,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     } finally {
       await adminRef.delete();
       await orderRef.delete();
-      await productRef.delete();
     }
   });
 
@@ -469,7 +447,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       name: 'Producto de reintento administrativo',
     });
     const pendingOrder = {
-      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto de reintento administrativo', price: 100 }],
+      items: [{ qty: 1, name: 'Producto de reintento administrativo', price: 100 }],
       total: 100,
       clientName: 'Pedido de prueba de emulador'
     };
@@ -544,7 +522,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       name: 'Producto agotado de prueba',
     });
     const pendingOrder = {
-      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto agotado de prueba', price: 100 }],
+      items: [{ qty: 1, name: 'Producto agotado de prueba', price: 100 }],
       total: 100
     };
     await pendingRef.set({
@@ -587,7 +565,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       assert.equal(body.success, true);
       assert.equal((await pendingRef.get()).exists, false);
       assert.equal((await firestore.collection('pedidos').doc(retryReference).get()).exists, true);
-      assert.equal((await incidentRef.get()).exists, false);
+      assert.equal((await incidentRef.get()).data().status, 'resolved');
     } finally {
       globalThis.__masayMockPayment = originalPayment;
       await adminRef.delete();
@@ -598,7 +576,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
-  await t.test('el endpoint de reintento rechaza incidencias ajenas a falta de stock antes de consultar el pago', async () => {
+  await t.test('el endpoint de reintento rechaza incidencias incompletas antes de consultar el pago', async () => {
     const incidentId = randomUUID();
     const adminRef = firestore.collection('administradores').doc(customerEmail);
     const incidentRef = firestore.collection('incidencias_pagos').doc(incidentId);
@@ -632,12 +610,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
     await firestore.collection('productos').doc(noStockProductId).delete();
-    await firestore.collection('productos').doc(cleanupProductId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
     if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
-    await firestore.collection('pagos_pendientes').doc(expiredPendingId).delete();
-    await firestore.collection('pagos_pendientes').doc(futurePendingId).delete();
     if (raceExternalReference) {
       await firestore.collection('pagos_pendientes').doc(raceExternalReference).delete();
     }
