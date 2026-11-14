@@ -432,7 +432,7 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
       if (fresh.status !== 'resolved') {
         transaction.update(incidentRef, {
           status: 'resolved',
-          resolution: 'approved_payment_registered_after_stock_review',
+          resolution: 'approved_payment_registered_after_admin_revalidation',
           adminResolvedAt: FieldValue.serverTimestamp(),
           adminResolvedBy: admin.email,
           updatedAt: FieldValue.serverTimestamp()
