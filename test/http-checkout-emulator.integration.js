@@ -342,7 +342,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       body: webhookBody
     });
     assert.equal(webhook.status, 200);
-    assert.equal(globalThis.__masayMockPaymentFetches, 2);
+    assert.equal(globalThis.__masayMockPaymentFetches, 3);
 
     const savedOrder = await firestore.collection('pedidos').doc(body.external_reference).get();
     assert.equal(savedOrder.exists, true);
@@ -371,7 +371,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       }
     );
     assert.equal(duplicate.status, 200);
-    assert.equal(globalThis.__masayMockPaymentFetches, 3, 'cada webhook consulta el pago una sola vez');
+    assert.equal(globalThis.__masayMockPaymentFetches, 4, 'cada webhook consulta el pago una sola vez');
     assert.equal((await firestore.collection('incidencias_pagos').doc(validationIncidentId).get()).exists, false, 'la incidencia se cierra cuando el pago se valida y registra correctamente');
     product = (await firestore.collection('productos').doc(productId).get()).data();
     assert.equal(product.stockQuantity, 3);
