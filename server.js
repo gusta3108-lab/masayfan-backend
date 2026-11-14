@@ -318,7 +318,10 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   let validationFailure = null;
   if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
     validationFailure = 'El importe o la moneda del pago no coincide con el pedido.';
-  } else if (!pending.preferenceId || !payment.preference_id || String(payment.preference_id) !== String(pending.preferenceId)) {
+  } else if (!pending.preferenceId || (payment.preference_id && String(payment.preference_id) !== String(pending.preferenceId))) {
+    // Mercado Pago puede omitir preference_id en el recurso Payment.
+    // La referencia externa única vincula el pago con este checkout; si MP sí
+    // informa preference_id, cualquier discrepancia sigue siendo un rechazo.
     validationFailure = 'La preferencia del pago no coincide con el pedido.';
   } else if (payment.metadata?.user_uid && String(payment.metadata.user_uid) !== String(pending.uid)) {
     validationFailure = 'La cuenta asociada al pago no coincide con el pedido.';
@@ -598,11 +601,15 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
     if (incident.status === 'resolved') {
       return res.json({ success: true, alreadyResolved: true, message: 'La incidencia ya estaba resuelta.' });
     }
-    if (incident.type !== 'approved_payment_stock_unavailable'
+    const missingPreferenceOnly = incident.type === 'approved_payment_validation_failed'
+      && incident.reason === 'La preferencia del pago no coincide con el pedido.'
+      && Boolean(incident.expectedPreferenceId)
+      && !incident.receivedPreferenceId;
+    if ((incident.type !== 'approved_payment_stock_unavailable' && !missingPreferenceOnly)
       || incident.paymentStatus !== 'approved'
       || !/^\d{1,30}$/.test(String(incident.paymentId || ''))
       || !/^[0-9a-f-]{36}$/i.test(String(incident.externalReference || ''))) {
-      return res.status(409).json({ success: false, error: 'Solo se pueden reintentar pagos aprobados cuya única incidencia sea la falta de stock.' });
+      return res.status(409).json({ success: false, error: 'Esta incidencia no cumple los requisitos para revalidar un pago aprobado.' });
     }
 
     // Vuelve a consultar y validar el pago en Mercado Pago. Si la reserva original
@@ -625,8 +632,16 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
     }
 
     await firestore.runTransaction(async transaction => {
-      const freshIncident = await transaction.get(incidentRef);
-      if (!freshIncident.exists) throw new Error('INCIDENT_NOT_FOUND');
+      const [freshIncident, registeredOrder] = await Promise.all([
+        transaction.get(incidentRef),
+        transaction.get(firestore.collection('pedidos').doc(String(incident.externalReference)))
+      ]);
+      // Validation incidents are removed atomically by registerApprovedPayment
+      // when it creates the order. Accept that only if the same payment is linked.
+      if (!freshIncident.exists) {
+        if (registeredOrder.exists && String(registeredOrder.data().paymentId) === String(incident.paymentId)) return;
+        throw new Error('INCIDENT_NOT_FOUND');
+      }
       const fresh = freshIncident.data();
       if (String(fresh.paymentId || '') !== String(incident.paymentId)
         || String(fresh.externalReference || '') !== String(incident.externalReference)) {
