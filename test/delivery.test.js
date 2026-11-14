@@ -63,7 +63,7 @@ test('courier order view includes the accepted fee and cash handoff state', () =
   assert.equal(missing.delivery.storeCashStatus, '');
 });
 
-test('delivery status only advances assigned -> on the way -> delivered', () => {
+test('delivery status only advances assigned -> pickup confirmed (en_camino) -> delivered', () => {
   assert.equal(canTransitionDeliveryStatus('assigned', 'en_camino'), true);
   assert.equal(canTransitionDeliveryStatus('en_camino', 'delivered'), true);
   assert.equal(canTransitionDeliveryStatus('assigned', 'delivered'), false);
@@ -92,6 +92,7 @@ test('courier order payload exposes only payment method and accepted delivery am
     address: 'Calle 1',
     total: 999,
     paymentMethod: 'efectivo',
+    displayOrderNumber: '0007',
     paymentId: 'secret',
     customerBankAccount: 'secret-account',
     items: [{ name: 'Torta', qty: 2, price: 400 }]
@@ -101,10 +102,11 @@ test('courier order payload exposes only payment method and accepted delivery am
   });
   assert.deepEqual(Object.keys(payload).sort(), [
     'address', 'clientName', 'courierId', 'courierName',
-    'delivery', 'deliveryLocation', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
+    'delivery', 'deliveryLocation', 'displayOrderNumber', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
   ].sort());
   assert.equal(Object.hasOwn(payload, 'clientPhone'), false, 'courier payload must not expose customer phone');
   assert.equal(payload.paymentMethod, 'efectivo');
+  assert.equal(payload.displayOrderNumber, '0007');
   assert.deepEqual(payload.delivery, {
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
   });
@@ -152,6 +154,8 @@ test('delivery route is optimized by nearest straight-line stop when all address
   assert.deepEqual(optimized.map(order => order.routeOrder), [1, 2, 3]);
   assert.match(buildGoogleMapsRouteUrl(optimized), /^https:\/\/www\.google\.com\/maps\/dir\/\?api=1/);
   assert.equal(buildGoogleMapsRouteSegments(optimized).length, 1);
+  const privateStoreRoute = buildGoogleMapsRouteSegments(optimized, 4, '-34.7,-58.5');
+  assert.match(privateStoreRoute[0].url, /origin=-34\.7%2C-58\.5/);
 });
 
 test('route optimization reports when any stop lacks valid coordinates', () => {

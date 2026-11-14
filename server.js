@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('node:crypto');
 const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder, isTestOrder } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
+const { reserveDisplayOrderNumber } = require('./lib/order-number');
 const cors = require('cors');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
@@ -320,8 +321,12 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
+      const displayOrderNumber = await reserveDisplayOrderNumber(
+        transaction, firestore.collection('secuencias').doc('pedidos'), FieldValue
+      );
       transaction.set(orderRef, {
         ...data.order,
+        displayOrderNumber,
         userEmail: data.userEmail,
         uid: data.uid,
         status: 'nuevo',
@@ -991,8 +996,23 @@ app.get('/api/courier/orders', async (req, res) => {
       .filter(order => ['assigned', 'en_camino'].includes(order.status))
       .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
     const completedCount = allAssignedOrders.filter(order => order.status === 'delivered').length;
-    const routeSegments = buildGoogleMapsRouteSegments(orders);
-    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, completedCount, routeSegments });
+    const pickupAddress = String(process.env.STORE_PICKUP_ADDRESS || '').trim();
+    const pickupLatRaw = String(process.env.STORE_PICKUP_LAT || '').trim();
+    const pickupLonRaw = String(process.env.STORE_PICKUP_LON || '').trim();
+    const pickupLat = Number(pickupLatRaw);
+    const pickupLon = Number(pickupLonRaw);
+    const pickupCoordinatesValid = Boolean(pickupLatRaw && pickupLonRaw)
+      && Number.isFinite(pickupLat) && Math.abs(pickupLat) <= 90
+      && Number.isFinite(pickupLon) && Math.abs(pickupLon) <= 180;
+    const pickup = orders.length ? {
+      address: pickupAddress || null,
+      location: pickupCoordinatesValid ? { lat: pickupLat, lon: pickupLon } : null
+    } : null;
+    const pickedUpOrders = orders.filter(order => order.status === 'en_camino');
+    const routeSegments = pickupCoordinatesValid && pickedUpOrders.length
+      ? buildGoogleMapsRouteSegments(pickedUpOrders, 4, pickupLat + ',' + pickupLon)
+      : [];
+    return res.json({ success: true, courier: { name: courierSnap.data().name }, pickup, orders, completedCount, routeSegments });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
@@ -1122,10 +1142,12 @@ app.post('/api/courier/route/optimize', async (req, res) => {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     const courierId = courierDocumentId(user.email);
-    const lat = Number(req.body?.origin?.lat);
-    const lon = Number(req.body?.origin?.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
-      return res.status(400).json({ success: false, error: 'No se recibió una ubicación válida.' });
+    const pickupLatRaw = String(process.env.STORE_PICKUP_LAT || '').trim();
+    const pickupLonRaw = String(process.env.STORE_PICKUP_LON || '').trim();
+    const lat = Number(pickupLatRaw);
+    const lon = Number(pickupLonRaw);
+    if (!pickupLatRaw || !pickupLonRaw || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return res.status(409).json({ success: false, error: 'La ubicación GPS del punto de retiro todavía no está configurada. Se mantiene el orden actual.' });
     }
     const courierRef = firestore.collection('repartidores').doc(courierId);
     const [courierSnap, assignedSnapshot] = await Promise.all([
@@ -1137,7 +1159,7 @@ app.post('/api/courier/route/optimize', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
     const activeDocs = assignedSnapshot.docs.filter(doc =>
-      ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')));
+      String(doc.data().delivery?.status || '') === 'en_camino');
     if (!activeDocs.length) return res.json({ success: true, routeSegments: [], stopCount: 0 });
     if (activeDocs.length > 50) return res.status(409).json({ success: false, error: 'Hay más de 50 entregas activas. Dividí el recorrido en dos tandas.' });
     const refs = activeDocs.map(doc => doc.ref);
@@ -1147,12 +1169,13 @@ app.post('/api/courier/route/optimize', async (req, res) => {
       deliveryLocation: doc.data().deliveryLocation || null
     }));
     const optimizationApplied = hasCompleteDeliveryCoordinates(routeOrders);
+    if (!optimizationApplied) return res.status(409).json({ success: false, error: 'Faltan coordenadas exactas confirmadas en uno o más pedidos. Se mantiene el orden actual.' });
     const optimized = optimizeDeliveryStops(routeOrders, { lat, lon });
     await firestore.runTransaction(async transaction => {
       const fresh = await Promise.all(refs.map(ref => transaction.get(ref)));
       fresh.forEach((snap, index) => {
         if (!snap.exists || snap.data().delivery?.courierId !== courierId
-          || !['assigned', 'en_camino'].includes(String(snap.data().delivery?.status || ''))) {
+          || String(snap.data().delivery?.status || '') !== 'en_camino') {
           throw new Error('ROUTE_CHANGED');
         }
       });
@@ -1163,7 +1186,7 @@ app.post('/api/courier/route/optimize', async (req, res) => {
         });
       });
     });
-    const routeSegments = buildGoogleMapsRouteSegments(optimized);
+    const routeSegments = buildGoogleMapsRouteSegments(optimized, 4, lat + ',' + lon);
     return res.json({
       success: true,
       stopCount: optimized.length,
@@ -1397,7 +1420,9 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     const orderData = { clientName, clientPhone, address, notes, ...(deliveryLocation ? { deliveryLocation } : {}), items: pricedItems, total };
     const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'efectivo');
     const orderRef = firestore.collection('pedidos').doc();
+    const orderSequenceRef = firestore.collection('secuencias').doc('pedidos');
     let finalOrderId = orderRef.id;
+    let finalDisplayOrderNumber = '';
     let replayed = false;
     let orderCreated = false;
     await firestore.runTransaction(async transaction => {
@@ -1410,13 +1435,16 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         }
         if (previous.status === 'completed' && previous.orderId) {
           finalOrderId = previous.orderId;
+          finalDisplayOrderNumber = String(previous.displayOrderNumber || '');
           replayed = true;
           return;
         }
         if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
       }
+      finalDisplayOrderNumber = await reserveDisplayOrderNumber(transaction, orderSequenceRef, FieldValue);
       transaction.create(orderRef, {
         ...orderData,
+        displayOrderNumber: finalDisplayOrderNumber,
         uid: user.uid,
         userEmail: user.email,
         status: 'nuevo',
@@ -1430,12 +1458,13 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         paymentMethod: 'efectivo',
         requestHash: idempotency.requestHash,
         orderId: orderRef.id,
+        displayOrderNumber: finalDisplayOrderNumber,
         status: 'completed',
         createdAt: FieldValue.serverTimestamp()
       });
     });
     if (orderCreated) notifyAdminsNewOrder(finalOrderId, orderData);
-    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, replayed });
+    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, order_number: finalDisplayOrderNumber || ('Ref. ' + String(finalOrderId).slice(-4)), replayed });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     if (error.message === 'ADMIN_CANNOT_PURCHASE') return res.status(403).json({ success: false, error: 'Las cuentas administradoras no pueden realizar compras.' });
@@ -1832,6 +1861,7 @@ app.post('/api/admin/orders/:orderId/courier-offer', async (req, res) => {
         ...offer, orderId, courierName: courierSnap.data().name || '',
         address: String(order.address || ''),
         clientName: String(order.clientName || ''),
+        displayOrderNumber: String(order.displayOrderNumber || ''),
         paymentMethod: String(order.paymentMethod || 'efectivo'),
         createdAt: FieldValue.serverTimestamp(),
         expiresAt,
@@ -1875,7 +1905,7 @@ app.get('/api/courier/offers', async (req, res) => {
     const offers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(offer => isCourierOfferVisible(offer, now))
       .map(offer => ({
-        id: offer.id, orderId: offer.orderId, amount: offer.amount,
+        id: offer.id, orderId: offer.orderId, displayOrderNumber: offer.displayOrderNumber || '', amount: offer.amount,
         orderTotal: offer.orderTotal, address: offer.address,
         clientName: offer.clientName, paymentMethod: offer.paymentMethod,
         expiresAtMillis: offer.expiresAtMillis
