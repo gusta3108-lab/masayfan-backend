@@ -829,7 +829,7 @@ app.post('/api/admin/test-order', async (req, res) => {
 app.post('/api/admin/orders/:orderId/status', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
-    await authenticatedAdmin(req);
+    const admin = await authenticatedAdmin(req);
     const orderId = String(req.params.orderId || '');
     const newStatus = String(req.body?.status || '');
     const allowed = ['nuevo', 'preparacion', 'listo', 'finalizado', 'rechazado'];
@@ -869,7 +869,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       let pendingOfferRef = null;
       let pendingOfferSnap = null;
       if (newStatus === 'rechazado') {
-        const closureEntry = buildDeliveryClosureHistoryEntry(order.delivery, 'admin', 'order_rejected');
+        const closureEntry = buildDeliveryClosureHistoryEntry(order.delivery, admin.email, 'order_rejected');
         const history = Array.isArray(order.deliveryHistory) ? order.deliveryHistory : [];
         if (closureEntry) {
           deliveryClosureUpdate = {
