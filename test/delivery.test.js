@@ -250,13 +250,13 @@ test('route planning preserves selected order when coordinates are incomplete an
 test('batch WhatsApp message contains all assigned stops and route links', () => {
   const { buildBatchCourierWhatsAppUrl } = require('../lib/delivery');
   const url = buildBatchCourierWhatsAppUrl({ whatsapp: '5491112345678' }, [
-    { orderId: 'A1', clientName: 'Ana', address: 'Calle Uno' },
+    { orderId: 'A1', clientName: 'Ana', clientPhone: '5491100011111', address: 'Calle Uno' },
     { orderId: 'B2', clientName: 'Luis', address: 'Calle Dos' }
   ], 'https://www.google.com/maps/dir/?api=1');
   const message = decodeURIComponent(url.split('?text=')[1]);
   assert.match(message, /Pedido A1/);
   assert.match(message, /Pedido B2/);
   assert.match(message, /Abrir ruta completa/);
-  assert.doesNotMatch(message, /Teléfono:/);
+  assert.doesNotMatch(message, /Teléfono:|5491100011111/);
 });
 
