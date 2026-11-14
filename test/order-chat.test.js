@@ -90,7 +90,7 @@ test('inactive, mismatched or unassigned couriers are denied', async () => {
   for (const item of cases) {
     await assert.rejects(
       resolveOrderChatParticipant({
-        user: { email },
+        user: { email, email_verified: true },
         order: { delivery: { courierId: item.assignedId } },
         firestore: fakeFirestore({ couriers: item.courier ? { [id]: item.courier } : {} }),
         courierDocumentId
