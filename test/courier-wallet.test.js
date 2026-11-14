@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet
+  buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, isCourierOfferVisible, summarizeCourierWallet
 } = require('../lib/courier-wallet');
 
 const courierId = 'a'.repeat(64);
@@ -91,4 +91,14 @@ test('cash settlement can only be confirmed after a courier delivered and collec
   assert.equal(canConfirmCourierCashSettlement({
     ...deliveredCashOrder, delivery: { ...deliveredCashOrder.delivery, offerAccepted: false }
   }), false);
+});
+
+test('courier sees only pending offers that have not expired', () => {
+  const now = 100000;
+  assert.equal(isCourierOfferVisible({ status: 'pending', expiresAtMillis: now + 1 }, now), true);
+  assert.equal(isCourierOfferVisible({ status: 'pending', expiresAtMillis: now }, now), false);
+  assert.equal(isCourierOfferVisible({ status: 'pending', expiresAtMillis: now - 1 }, now), false);
+  assert.equal(isCourierOfferVisible({ status: 'rejected', expiresAtMillis: now + 1000 }, now), false);
+  assert.equal(isCourierOfferVisible({ status: 'accepted', expiresAtMillis: now + 1000 }, now), false);
+  assert.equal(isCourierOfferVisible({ status: 'expired', expiresAtMillis: now + 1000 }, now), false);
 });
