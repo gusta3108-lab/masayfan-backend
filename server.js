@@ -999,10 +999,10 @@ app.get('/api/courier/orders', async (req, res) => {
     const pickupCoordinatesValid = Boolean(pickupLatRaw && pickupLonRaw)
       && Number.isFinite(pickupLat) && Math.abs(pickupLat) <= 90
       && Number.isFinite(pickupLon) && Math.abs(pickupLon) <= 180;
-    const pickup = {
+    const pickup = orders.length ? {
       address: pickupAddress || null,
       location: pickupCoordinatesValid ? { lat: pickupLat, lon: pickupLon } : null
-    };
+    } : null;
     const pickedUpOrders = orders.filter(order => order.status === 'en_camino');
     const routeSegments = pickupCoordinatesValid && pickedUpOrders.length
       ? buildGoogleMapsRouteSegments(pickedUpOrders, 4, pickupLat + ',' + pickupLon)
