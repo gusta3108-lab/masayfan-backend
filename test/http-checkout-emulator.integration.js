@@ -26,7 +26,6 @@ process.env.FIREBASE_SERVICE_ACCOUNT_JSON = JSON.stringify({
 });
 process.env.MP_ACCESS_TOKEN = 'TEST-ONLY-NOT-A-REAL-MERCADO-PAGO-TOKEN';
 process.env.MP_WEBHOOK_SECRET = 'local-emulator-webhook-secret';
-process.env.INVENTORY_CLEANUP_SECRET = 'local-emulator-cleanup-secret';
 
 globalThis.__masayMockPreference = null;
 globalThis.__masayMockPreferenceCalls = 0;
@@ -88,9 +87,6 @@ let customerEmail = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const noStockProductId = 'http-no-stock-' + randomUUID();
-const cleanupProductId = 'http-cleanup-' + randomUUID();
-const expiredPendingId = 'http-expired-' + randomUUID();
-const futurePendingId = 'http-future-' + randomUUID();
 const restoreProductId = 'http-restore-' + randomUUID();
 const refundOrderId = 'http-refund-order-' + randomUUID();
 let raceOrderId = null;
@@ -122,9 +118,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     name: 'Producto HTTP de prueba',
     price: 100,
     activo: true,
-    stockManaged: true,
-    stockQuantity: 5,
-    stockReserved: 0
   });
 
   const headers = {
@@ -150,10 +143,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(response.status, 400, JSON.stringify(body));
     assert.match(body.error, /ubicación del mapa no es válida/i);
     const product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 5, 'una ubicación inválida no debe descontar inventario');
   });
 
-  await t.test('el checkout en efectivo crea el pedido y descuenta stock', async () => {
+  await t.test('el checkout en efectivo crea el pedido sin modificar inventario', async () => {
     const key = randomUUID();
     const response = await fetch(baseUrl + '/api/pedidos/efectivo', {
       method: 'POST',
@@ -169,8 +161,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(savedOrder.data().uid, userUid);
     assert.deepEqual(savedOrder.data().deliveryLocation, order.deliveryLocation, 'el pedido debe conservar las coordenadas seleccionadas en el mapa');
     let product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 4);
-    assert.equal(product.stockReserved, 0);
 
     const replay = await fetch(baseUrl + '/api/pedidos/efectivo', {
       method: 'POST',
@@ -182,7 +172,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(replayBody.replayed, true);
     assert.equal(replayBody.order_id, body.order_id);
     product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 4, 'repetir el checkout en efectivo no debe descontar stock otra vez');
 
     const crossMethodReuse = await fetch(baseUrl + '/api/crear-preferencia', {
       method: 'POST',
@@ -193,46 +182,22 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(crossMethodReuse.status, 409, JSON.stringify(crossMethodBody));
     assert.match(crossMethodBody.error, /intento de compra ya fue utilizado/i);
     product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 4);
-    assert.equal(product.stockReserved, 0, 'reutilizar la clave entre métodos no debe reservar stock');
   });
 
-  await t.test('sin stock no se genera preferencia ni se registra un pago pendiente', async () => {
-    await firestore.collection('productos').doc(noStockProductId).set({
-      name: 'Producto agotado de prueba',
-      price: 100,
-      activo: true,
-      stockManaged: true,
-      stockQuantity: 0,
-      stockReserved: 0
-    });
+  await t.test('un producto desactivado manualmente no puede generar un checkout', async () => {
+    await firestore.collection('productos').doc(noStockProductId).set({ name: 'Producto pausado de prueba', price: 100, activo: false });
     const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
     const response = await fetch(baseUrl + '/api/crear-preferencia', {
-      method: 'POST',
-      headers: { ...headers, 'Idempotency-Key': randomUUID() },
-      body: JSON.stringify({
-        items: [{ id: noStockProductId, qty: 1, price: 100, options: '' }],
-        order
-      })
+      method: 'POST', headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({ items: [{ id: noStockProductId, qty: 1, price: 100, options: '' }], order })
     });
     const body = await response.json();
-
-    assert.equal(response.status, 409, JSON.stringify(body));
-    assert.equal(body.code, 'STOCK_INSUFFICIENT');
-    assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore,
-      'Mercado Pago no debe recibir una solicitud de pago si no hay stock');
-    assert.equal(
-      (await firestore.collection('pagos_pendientes').get()).docs
-        .some(doc => doc.data().order?.items?.some(item => item.stockProductId === noStockProductId)),
-      false,
-      'no debe quedar una orden de pago pendiente para el producto agotado'
-    );
-    const product = (await firestore.collection('productos').doc(noStockProductId).get()).data();
-    assert.equal(product.stockQuantity, 0);
-    assert.equal(product.stockReserved, 0);
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.match(body.error, /no está disponible/i);
+    assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore, 'un producto desactivado no debe llegar a Mercado Pago');
   });
 
-  await t.test('Mercado Pago reserva stock y el webhook simulado confirma una sola venta', async () => {
+  await t.test('Mercado Pago crea el checkout y el webhook simulado registra una sola orden y el webhook simulado confirma una sola venta', async () => {
     const mpIdempotencyKey = randomUUID();
     const response = await fetch(baseUrl + '/api/crear-preferencia', {
       method: 'POST',
@@ -257,8 +222,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(replayBody.init_point, body.init_point);
 
     let product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 4);
-    assert.equal(product.stockReserved, 1, 'repetir Mercado Pago no debe duplicar la reserva');
     const pendingCheckout = (await firestore.collection('pagos_pendientes').doc(body.external_reference).get()).data();
     assert.deepEqual(pendingCheckout.order.deliveryLocation, order.deliveryLocation, 'el checkout de Mercado Pago debe conservar las coordenadas');
 
@@ -306,15 +269,26 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(validationIncident.exists, true, 'el pago aprobado con importe incorrecto debe quedar visible para administración');
     assert.equal(validationIncident.data().status, 'needs_admin_review');
     product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 4);
-    assert.equal(product.stockReserved, 1);
-
-    // El cleanup no puede liberar una reserva cuyo pago aprobado está en revisión.
-    const { releasePendingInventory } = require('../lib/inventory').createInventoryService({ getFirestore: () => firestore });
-    assert.equal(await releasePendingInventory(firestore.collection('pagos_pendientes').doc(body.external_reference)), false);
-    assert.equal((await firestore.collection('productos').doc(productId).get()).data().stockReserved, 1);
 
     globalThis.__masayMockPayment.transaction_amount = 100;
+    // Si Mercado Pago sí informa preference_id, una discrepancia real se rechaza.
+    globalThis.__masayMockPayment.preference_id = 'pref-emulator-different';
+    const mismatchedPreference = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedWebhookHeaders('987654321', 'emulator-wrong-preference', process.env.MP_WEBHOOK_SECRET)
+      },
+      body: webhookBody
+    });
+    assert.equal(mismatchedPreference.status, 200);
+    const preferenceIncident = await firestore.collection('incidencias_pagos').doc(validationIncidentId).get();
+    assert.equal(preferenceIncident.data().reason, 'La preferencia del pago no coincide con el pedido.');
+    assert.equal((await firestore.collection('pedidos').doc(body.external_reference).get()).exists, false);
+
+    // Mercado Pago puede omitir preference_id en Payment; la referencia
+    // externa única, el importe, la moneda y metadata.uid siguen verificándose.
+    delete globalThis.__masayMockPayment.preference_id;
     const webhook = await fetch(webhookUrl, {
       method: 'POST',
       headers: {
@@ -324,7 +298,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       body: webhookBody
     });
     assert.equal(webhook.status, 200);
-    assert.equal(globalThis.__masayMockPaymentFetches, 2);
+    assert.equal(globalThis.__masayMockPaymentFetches, 3);
 
     const savedOrder = await firestore.collection('pedidos').doc(body.external_reference).get();
     assert.equal(savedOrder.exists, true);
@@ -337,10 +311,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     );
 
     product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 3);
-    assert.equal(product.stockReserved, 0);
 
-    // Repetir el webhook no debe crear otro pedido ni volver a descontar stock.
+    // Repetir el webhook no debe crear otro pedido.
     const duplicate = await fetch(
       webhookUrl,
       {
@@ -353,161 +325,33 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       }
     );
     assert.equal(duplicate.status, 200);
-    assert.equal(globalThis.__masayMockPaymentFetches, 3, 'cada webhook consulta el pago una sola vez');
+    assert.equal(globalThis.__masayMockPaymentFetches, 4, 'cada webhook consulta el pago una sola vez');
     assert.equal((await firestore.collection('incidencias_pagos').doc(validationIncidentId).get()).exists, false, 'la incidencia se cierra cuando el pago se valida y registra correctamente');
     product = (await firestore.collection('productos').doc(productId).get()).data();
-    assert.equal(product.stockQuantity, 3);
-    assert.equal(product.stockReserved, 0);
   });
 
-  await t.test('dos checkouts HTTP simultáneos (efectivo y Mercado Pago) no venden dos veces la última unidad', async () => {
-    await firestore.collection('productos').doc(raceProductId).set({
-      name: 'Producto de concurrencia HTTP',
-      price: 100,
-      activo: true,
-      stockManaged: true,
-      stockQuantity: 1,
-      stockReserved: 0
-    });
+  await t.test('dos checkouts simultáneos no se bloquean por cantidades de inventario', async () => {
+    await firestore.collection('productos').doc(raceProductId).set({ name: 'Producto de concurrencia HTTP', price: 100, activo: true });
     const raceItems = [{ id: raceProductId, qty: 1, price: 100, options: '' }];
     const [cashResponse, mpResponse] = await Promise.all([
-      fetch(baseUrl + '/api/pedidos/efectivo', {
-        method: 'POST',
-        headers: { ...headers, 'Idempotency-Key': randomUUID() },
-        body: JSON.stringify({ items: raceItems, order })
-      }),
-      fetch(baseUrl + '/api/crear-preferencia', {
-        method: 'POST',
-        headers: { ...headers, 'Idempotency-Key': randomUUID() },
-        body: JSON.stringify({ items: raceItems, order })
-      })
+      fetch(baseUrl + '/api/pedidos/efectivo', { method: 'POST', headers: { ...headers, 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ items: raceItems, order }) }),
+      fetch(baseUrl + '/api/crear-preferencia', { method: 'POST', headers: { ...headers, 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ items: raceItems, order }) })
     ]);
     const [cashBody, mpBody] = await Promise.all([cashResponse.json(), mpResponse.json()]);
-    const outcomes = [
-      { status: cashResponse.status, body: cashBody, method: 'efectivo' },
-      { status: mpResponse.status, body: mpBody, method: 'mercadopago' }
-    ];
-    const winners = outcomes.filter(result => result.status === 201 || result.status === 200);
-    const rejected = outcomes.filter(result => result.status === 409);
-
-    assert.equal(winners.length, 1, JSON.stringify(outcomes));
-    assert.equal(rejected.length, 1, JSON.stringify(outcomes));
-    assert.equal(rejected[0].body.code, 'STOCK_INSUFFICIENT');
-    if (winners[0].method === 'efectivo') {
-      raceOrderId = winners[0].body.order_id;
-      const product = (await firestore.collection('productos').doc(raceProductId).get()).data();
-      assert.equal(product.stockQuantity, 0);
-      assert.equal(product.stockReserved, 0);
-    } else {
-      raceExternalReference = winners[0].body.external_reference;
-      assert.ok(raceExternalReference);
-      const product = (await firestore.collection('productos').doc(raceProductId).get()).data();
-      assert.equal(product.stockQuantity, 1);
-      assert.equal(product.stockReserved, 1);
-      assert.equal(
-        (await firestore.collection('pagos_pendientes').doc(raceExternalReference).get()).exists,
-        true
-      );
-    }
+    assert.equal(cashResponse.status, 201, JSON.stringify(cashBody));
+    assert.equal(mpResponse.status, 200, JSON.stringify(mpBody));
+    raceOrderId = cashBody.order_id;
+    raceExternalReference = mpBody.external_reference;
+    assert.ok((await firestore.collection('pedidos').doc(raceOrderId).get()).exists);
+    assert.ok((await firestore.collection('pagos_pendientes').doc(raceExternalReference).get()).exists);
   });
 
-  await t.test('el endpoint protegido libera solo reservas vencidas y la repetición no vuelve a descontar', async () => {
-    const productRef = firestore.collection('productos').doc(cleanupProductId);
-    const expiredRef = firestore.collection('pagos_pendientes').doc(expiredPendingId);
-    const futureRef = firestore.collection('pagos_pendientes').doc(futurePendingId);
-    const expiredAt = Timestamp.fromDate(new Date(Date.now() - 31 * 60 * 1000));
-    const futureAt = Timestamp.fromDate(new Date(Date.now() + 60000));
-    await productRef.set({
-      name: 'Producto de limpieza HTTP',
-      stockManaged: true,
-      stockQuantity: 4,
-      stockReserved: 2
-    });
-    await expiredRef.set({
-      order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
-      inventoryReleased: false,
-      preferenceId: 'pref-expired-emulator',
-      expiresAt: expiredAt
-    });
-    await futureRef.set({
-      order: { items: [{ stockProductId: cleanupProductId, qty: 1 }] },
-      inventoryReleased: false,
-      expiresAt: futureAt
-    });
-
-    const endpoint = baseUrl + '/api/internal/release-expired-inventory';
-    const unauthorized = await fetch(endpoint, { method: 'POST' });
-    assert.equal(unauthorized.status, 401);
-    assert.equal((await productRef.get()).data().stockReserved, 2);
-
-    const headersWithCleanupSecret = { 'x-inventory-cleanup-secret': process.env.INVENTORY_CLEANUP_SECRET };
-    // Mock only the Mercado Pago payment-search endpoint. The local HTTP server
-    // and Firebase emulators continue using their real local fetch connections.
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (input, options) => {
-      const url = new URL(input instanceof URL ? input.href : (typeof input === 'string' ? input : input.url));
-      if (url.origin === 'https://api.mercadopago.com'
-        && url.pathname === '/v1/payments/search') {
-        return new Response(JSON.stringify({ paging: { total: 0 }, results: [] }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' }
-        });
-      }
-      return originalFetch(input, options);
-    };
-    let firstRun;
-    let firstBody;
-    try {
-      firstRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
-      firstBody = await firstRun.json();
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-    assert.equal(firstRun.status, 200, JSON.stringify(firstBody));
-    assert.equal(firstBody.success, true);
-    assert.equal(firstBody.released, 1);
-    assert.equal(firstBody.failed, 0);
-    assert.equal(firstBody.checked, 1);
-    assert.equal(firstBody.truncated, false);
-
-    let product = (await productRef.get()).data();
-    assert.equal(product.stockQuantity, 4);
-    assert.equal(product.stockReserved, 1);
-    const expired = (await expiredRef.get()).data();
-    assert.equal(expired.inventoryReleased, true);
-    assert.equal(expired.expiresAt, undefined);
-    assert.equal(expired.reservationExpiresAt.toMillis(), expiredAt.toMillis());
-    const future = (await futureRef.get()).data();
-    assert.equal(future.inventoryReleased, false);
-    assert.equal(future.expiresAt.toMillis(), futureAt.toMillis());
-
-    const secondRun = await fetch(endpoint, { method: 'POST', headers: headersWithCleanupSecret });
-    const secondBody = await secondRun.json();
-    assert.equal(secondRun.status, 200, JSON.stringify(secondBody));
-    assert.equal(secondBody.success, true);
-    assert.equal(secondBody.released, 0);
-    assert.equal(secondBody.failed, 0);
-    assert.equal(secondBody.checked, 0);
-    assert.equal(secondBody.truncated, false);
-    product = (await productRef.get()).data();
-    assert.equal(product.stockReserved, 1);
-
-  });
-
-  await t.test('el rechazo de un pago Mercado Pago exige devolución y restaura stock una sola vez', async () => {
-    await firestore.collection('productos').doc(restoreProductId).set({
-      name: 'Producto para prueba de devolución',
-      stockManaged: true,
-      stockQuantity: 1,
-      stockReserved: 0
-    });
+  await t.test('el rechazo de un pago Mercado Pago exige devolución', async () => {
     await firestore.collection('pedidos').doc(refundOrderId).set({
-      items: [{ stockProductId: restoreProductId, qty: 1 }],
+      items: [{ qty: 1 }],
       status: 'nuevo',
       paymentMethod: 'mercadopago',
       paymentStatus: 'approved',
-      inventoryCommitted: true,
-      inventoryRestored: false
     });
     await firestore.collection('administradores').doc(customerEmail).set({ enabled: true });
 
@@ -520,11 +364,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     });
     const beforeRefundBody = await beforeRefund.json();
     assert.equal(beforeRefund.status, 409, JSON.stringify(beforeRefundBody));
-    assert.equal(
-      (await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity,
-      1,
-      'no se devuelve inventario antes de confirmar el reembolso'
-    );
 
     await firestore.collection('pedidos').doc(refundOrderId).update({ paymentStatus: 'refunded' });
     const attempts = await Promise.all([
@@ -533,13 +372,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     ]);
     const bodies = await Promise.all(attempts.map(response => response.json()));
     assert.ok(attempts.every(response => response.status === 200), JSON.stringify(bodies));
-
-    const product = (await firestore.collection('productos').doc(restoreProductId).get()).data();
     const orderAfterReject = (await firestore.collection('pedidos').doc(refundOrderId).get()).data();
-    assert.equal(product.stockQuantity, 2);
-    assert.equal(product.stockReserved, 0);
     assert.equal(orderAfterReject.status, 'rechazado');
-    assert.equal(orderAfterReject.inventoryRestored, true);
 
     const repeated = await fetch(endpoint, {
       method: 'POST',
@@ -547,29 +381,19 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       body: JSON.stringify({ status: 'rechazado' })
     });
     assert.equal(repeated.status, 200);
-    assert.equal((await firestore.collection('productos').doc(restoreProductId).get()).data().stockQuantity, 2);
   });
 
   await t.test('un pedido de prueba recorre todas las etapas sin tocar inventario ni pagos', async () => {
     const testOrderId = 'http-test-order-' + randomUUID();
     const testProductId = 'http-test-product-' + randomUUID();
     const orderRef = firestore.collection('pedidos').doc(testOrderId);
-    const productRef = firestore.collection('productos').doc(testProductId);
     const adminRef = firestore.collection('administradores').doc(customerEmail);
-    const originalStock = 7;
-    await productRef.set({
-      name: 'Producto aislado para pedido ficticio',
-      stockManaged: true,
-      stockQuantity: originalStock,
-      stockReserved: 0
-    });
     await orderRef.set({
       esPrueba: true,
       status: 'nuevo',
       paymentMethod: 'prueba',
       paymentStatus: 'not_applicable',
-      inventoryCommitted: false,
-      items: [{ stockProductId: testProductId, qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
+      items: [{ qty: 2, name: 'Producto aislado para pedido ficticio', price: 100 }]
     });
     await adminRef.set({ enabled: true });
 
@@ -589,15 +413,11 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
         assert.equal(saved.status, status);
         assert.equal(saved.testResolution, 'accepted');
         assert.equal(saved.paymentStatus, 'not_applicable');
-        assert.equal(saved.inventoryCommitted, false);
       }
 
       const completed = (await orderRef.get()).data();
       assert.ok(completed.testResolvedAt);
       assert.ok(completed.testCompletedAt);
-      const product = (await productRef.get()).data();
-      assert.equal(product.stockQuantity, originalStock);
-      assert.equal(product.stockReserved, 0);
 
       const invalid = await fetch(endpoint, {
         method: 'POST',
@@ -608,11 +428,10 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     } finally {
       await adminRef.delete();
       await orderRef.delete();
-      await productRef.delete();
     }
   });
 
-  await t.test('el administrador puede reintentar un pago aprobado tras liberar la reserva solo si hay stock disponible, sin duplicar el descuento', async () => {
+  await t.test('el administrador puede revalidar un pago aprobado sin inventario automático', async () => {
     const retryProductId = 'http-retry-' + randomUUID();
     const retryReference = randomUUID();
     const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
@@ -625,12 +444,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
 
     await firestore.collection('productos').doc(retryProductId).set({
       name: 'Producto de reintento administrativo',
-      stockManaged: true,
-      stockQuantity: 2,
-      stockReserved: 0
     });
     const pendingOrder = {
-      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto de reintento administrativo', price: 100 }],
+      items: [{ qty: 1, name: 'Producto de reintento administrativo', price: 100 }],
       total: 100,
       clientName: 'Pedido de prueba de emulador'
     };
@@ -640,7 +456,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       total: 100,
       preferenceId: 'pref-retry-emulator',
       order: pendingOrder,
-      inventoryReleased: true
     });
     await incidentRef.set({
       type: 'approved_payment_stock_unavailable',
@@ -677,12 +492,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       assert.ok(bodies.every(body => body.success), JSON.stringify(bodies));
 
       const product = (await firestore.collection('productos').doc(retryProductId).get()).data();
-      assert.equal(product.stockQuantity, 1, 'dos reintentos concurrentes descuentan una sola unidad');
-      assert.equal(product.stockReserved, 0);
       const savedOrder = await firestore.collection('pedidos').doc(retryReference).get();
       assert.equal(savedOrder.exists, true);
       assert.equal(savedOrder.data().paymentStatus, 'approved');
-      assert.equal(savedOrder.data().inventoryCommitted, true);
       assert.equal((await pendingRef.get()).exists, false);
       assert.equal((await incidentRef.get()).data().status, 'resolved');
       assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore, 'reintentar no crea otra preferencia ni inicia otro cobro');
@@ -696,7 +508,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
-  await t.test('el reintento administrativo conserva la incidencia y el pedido pendiente si el stock sigue agotado', async () => {
+  await t.test('el reintento administrativo no depende de cantidades de inventario', async () => {
     const retryProductId = 'http-retry-empty-' + randomUUID();
     const retryReference = randomUUID();
     const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
@@ -707,12 +519,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
 
     await firestore.collection('productos').doc(retryProductId).set({
       name: 'Producto agotado de prueba',
-      stockManaged: true,
-      stockQuantity: 0,
-      stockReserved: 0
     });
     const pendingOrder = {
-      items: [{ stockProductId: retryProductId, qty: 1, name: 'Producto agotado de prueba', price: 100 }],
+      items: [{ qty: 1, name: 'Producto agotado de prueba', price: 100 }],
       total: 100
     };
     await pendingRef.set({
@@ -721,7 +530,6 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       total: 100,
       preferenceId: 'pref-retry-empty-emulator',
       order: pendingOrder,
-      inventoryReleased: true
     });
     await incidentRef.set({
       type: 'approved_payment_stock_unavailable',
@@ -752,12 +560,11 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
         { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
       );
       const body = await response.json();
-      assert.equal(response.status, 409, JSON.stringify(body));
-      assert.equal(body.success, false);
-      assert.equal((await firestore.collection('productos').doc(retryProductId).get()).data().stockQuantity, 0);
-      assert.equal((await pendingRef.get()).exists, true);
-      assert.equal((await firestore.collection('pedidos').doc(retryReference).get()).exists, false);
-      assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.equal(body.success, true);
+      assert.equal((await pendingRef.get()).exists, false);
+      assert.equal((await firestore.collection('pedidos').doc(retryReference).get()).exists, true);
+      assert.equal((await incidentRef.get()).data().status, 'resolved');
     } finally {
       globalThis.__masayMockPayment = originalPayment;
       await adminRef.delete();
@@ -768,7 +575,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
-  await t.test('el endpoint de reintento rechaza incidencias ajenas a falta de stock antes de consultar el pago', async () => {
+  await t.test('el endpoint de reintento rechaza incidencias incompletas antes de consultar el pago', async () => {
     const incidentId = randomUUID();
     const adminRef = firestore.collection('administradores').doc(customerEmail);
     const incidentRef = firestore.collection('incidencias_pagos').doc(incidentId);
@@ -790,7 +597,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       assert.equal(response.status, 409, JSON.stringify(body));
       assert.equal(body.success, false);
       assert.equal(globalThis.__masayMockPaymentFetches, paymentFetchesBefore,
-        'una incidencia de validación nunca debe disparar el flujo de reintento de stock');
+        'una incidencia de validación incompleta no debe disparar el reintento administrativo');
       assert.equal((await incidentRef.get()).data().status, 'needs_admin_review');
     } finally {
       await adminRef.delete();
@@ -802,12 +609,9 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
     await firestore.collection('productos').doc(noStockProductId).delete();
-    await firestore.collection('productos').doc(cleanupProductId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
     if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
-    await firestore.collection('pagos_pendientes').doc(expiredPendingId).delete();
-    await firestore.collection('pagos_pendientes').doc(futurePendingId).delete();
     if (raceExternalReference) {
       await firestore.collection('pagos_pendientes').doc(raceExternalReference).delete();
     }
