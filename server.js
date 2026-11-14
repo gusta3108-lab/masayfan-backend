@@ -1296,7 +1296,7 @@ app.post('/api/orders/:orderId/chat', async (req, res) => {
       const orderSnap = await transaction.get(orderRef);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
-      participant = await resolveOrderChatParticipant({ user, order, firestore, courierDocumentId });
+      participant = await resolveOrderChatParticipant({ user, order, firestore, courierDocumentId, transaction });
       if (!participant.canSend) throw new Error('CHAT_READ_ONLY');
       if (isOrderChatClosed(order)) throw new Error('CHAT_CLOSED');
       transaction.create(messageRef, {
