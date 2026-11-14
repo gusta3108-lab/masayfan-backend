@@ -22,9 +22,21 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Generate lockfile without running package scripts
-        run: npm install --package-lock-only --ignore-scripts --no-audit
+      - name: Install dependencies without running package scripts
+        run: npm install --ignore-scripts --no-audit
+      - name: Record npm version
+        run: npm --version
       - name: Audit production and development dependency tree
         run: |
           npm audit --json > npm-audit.json || true
-          node -e "const r=require('./npm-audit.json'); console.log(JSON.stringify({metadata:r.metadata, vulnerabilities:r.vulnerabilities}, null, 2)); if ((r.metadata?.vulnerabilities?.critical || 0) + (r.metadata?.vulnerabilities?.high || 0) + (r.metadata?.vulnerabilities?.moderate || 0) > 0) process.exitCode=1"
+          node -e "const r=require('./npm-audit.json'); console.log(JSON.stringify({metadata:r.metadata, vulnerabilities:r.vulnerabilities}, null, 2)); if (!r.metadata) process.exit(2); if ((r.metadata.vulnerabilities?.critical || 0) + (r.metadata.vulnerabilities?.high || 0) + (r.metadata.vulnerabilities?.moderate || 0) > 0) process.exitCode=1"
+      - name: Preserve audit report and resolved lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-security-audit-report
+          path: |
+            npm-audit.json
+            package-lock.json
+          if-no-files-found: warn
+          retention-days: 14
