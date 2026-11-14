@@ -1283,15 +1283,19 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
         throw new Error('ORDER_NOT_DELIVERABLE');
       }
       if (delivery.status === nextStatus) return;
-      if (nextStatus === 'en_camino'
-        && ['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())
-        && delivery.storeCashStatus !== 'received') throw new Error('CASH_HANDOFF_REQUIRED');
       const update = {
         'delivery.status': nextStatus,
         ...(nextStatus === 'en_camino' ? { 'delivery.pickedUpAt': FieldValue.serverTimestamp() } : {
           'delivery.deliveredAt': FieldValue.serverTimestamp(),
           status: 'finalizado',
-          completedAt: new Date().toISOString()
+          completedAt: new Date().toISOString(),
+          ...(['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())
+            ? {
+                paymentStatus: 'cash_received',
+                paymentReceivedAt: FieldValue.serverTimestamp(),
+                paymentReceivedBy: String(user.email).toLowerCase()
+              }
+            : {})
         })
       };
       if (nextStatus === 'delivered' && delivery.offerAccepted === true) {
@@ -1858,7 +1862,9 @@ app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
       const order = snap.data();
       const delivery = order.delivery || {};
       if (!['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())) throw new Error('CASH_ONLY');
-      if (delivery.offerAccepted !== true || !delivery.courierId || delivery.status !== 'assigned') throw new Error('DELIVERY_NOT_ASSIGNED');
+      if (delivery.offerAccepted !== true || !delivery.courierId
+        || delivery.status !== 'delivered' || !['finalizado', 'entregado'].includes(String(order.status || ''))
+        || order.paymentStatus !== 'cash_received') throw new Error('DELIVERY_NOT_COMPLETED');
       if (delivery.storeCashStatus === 'received') return { alreadyReceived: true, amount: delivery.storeAmount };
       const amount = Number(delivery.storeAmount);
       if (!Number.isFinite(amount) || amount < 0) throw new Error('STORE_AMOUNT_INVALID');
@@ -1874,7 +1880,7 @@ app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'CASH_ONLY') return res.status(409).json({ success: false, error: 'Este procedimiento solo aplica a pedidos en efectivo.' });
-    if (error.message === 'DELIVERY_NOT_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido debe tener una oferta aceptada y estar asignado.' });
+    if (error.message === 'DELIVERY_NOT_COMPLETED') return res.status(409).json({ success: false, error: 'El pedido debe estar entregado y el efectivo del cliente confirmado antes de registrar la rendición a Masay.' });
     if (error.message === 'STORE_AMOUNT_INVALID') return res.status(409).json({ success: false, error: 'El importe que corresponde a Masay es inválido.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para confirmar cobros.' });
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
