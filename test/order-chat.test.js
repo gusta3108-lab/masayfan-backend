@@ -22,6 +22,7 @@ function fakeFirestore({ admins = [], couriers = {} } = {}) {
               ? (couriers[id] || null)
               : null;
           return {
+            collectionName: name,
             get: async () => ({
               exists: value !== null,
               data: () => value || {}
@@ -41,6 +42,16 @@ test('the order owner can access their private chat by normalized account email'
     courierDocumentId
   });
   assert.deepEqual(participant, { role: 'customer', name: 'Ana Pérez', canSend: true });
+});
+
+test('participant display names never expose phone-like digit sequences', async () => {
+  const participant = await resolveOrderChatParticipant({
+    user: { email: 'cliente@example.com' },
+    order: { userEmail: 'cliente@example.com', clientName: 'Ana Pérez +54 9 11 2345-6789' },
+    firestore: fakeFirestore(),
+    courierDocumentId
+  });
+  assert.equal(participant.name, 'Ana Pérez');
 });
 
 test('a different customer cannot read or send messages in another order chat', async () => {
@@ -97,6 +108,31 @@ test('administrators can supervise chat but cannot send messages', async () => {
     courierDocumentId
   });
   assert.deepEqual(participant, { role: 'admin', name: 'Administración', canSend: false });
+});
+
+
+test('message authorization reads admin and courier membership inside the sending transaction', async () => {
+  const email = 'courier@example.com';
+  const id = courierDocumentId(email);
+  const firestore = fakeFirestore({
+    couriers: { [id]: { email, name: 'Repartidor', active: true } }
+  });
+  const transactionReads = [];
+  const transaction = {
+    get: async ref => {
+      transactionReads.push(ref.collectionName);
+      return ref.get();
+    }
+  };
+  const participant = await resolveOrderChatParticipant({
+    user: { email },
+    order: { delivery: { courierId: id } },
+    firestore,
+    courierDocumentId,
+    transaction
+  });
+  assert.equal(participant.role, 'courier');
+  assert.deepEqual(transactionReads, ['administradores', 'repartidores']);
 });
 
 test('order chat closes when delivery is unassigned, completed, rejected or cancelled', () => {
