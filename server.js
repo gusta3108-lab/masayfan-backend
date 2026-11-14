@@ -20,7 +20,7 @@ const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry } = require('./lib/delivery');
-const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet } = require('./lib/courier-wallet');
+const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
 
 const app = express();
