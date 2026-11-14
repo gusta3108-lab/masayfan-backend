@@ -84,28 +84,57 @@ const { authenticatedUser, authenticatedVerifiedUser, authenticatedAdmin } = cre
 
 // Los privilegios administrativos y operativos requieren correo verificado.
 // Se cachea el token decodificado en req para evitar verificarlo dos veces en cada ruta.
-async function requireVerifiedRoleEmail(req, res, next) {
+async function requireVerifiedAdminEmail(req, res, next) {
   try {
-    await authenticatedVerifiedUser(req);
-    return next();
-  } catch (error) {
-    if (error.message === 'EMAIL_NOT_VERIFIED') {
+    const user = await authenticatedUser(req);
+    const email = String(user.email).trim().toLowerCase();
+    const adminSnap = await firestore.collection('administradores').doc(email).get();
+    if (!adminSnap.exists) return next(); // La ruta responderá ADMIN_REQUIRED sin revelar datos.
+    if (user.email_verified !== true) {
       return res.status(403).json({
         success: false,
         code: 'EMAIL_NOT_VERIFIED',
-        error: 'Verificá el correo de esta cuenta para acceder a las funciones de administración o reparto.'
+        error: 'Verificá el correo de la cuenta administradora para acceder al panel.'
       });
     }
+    return next();
+  } catch (error) {
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) {
       return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     }
-    console.error('No se pudo validar el correo de una cuenta privilegiada:', error.message);
+    console.error('No se pudo validar el correo administrativo:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudo validar la sesión.' });
   }
 }
 
-app.use('/api/admin', requireVerifiedRoleEmail);
-app.use('/api/courier', requireVerifiedRoleEmail);
+async function requireVerifiedCourierEmail(req, res, next) {
+  try {
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const courierSnap = await firestore.collection('repartidores').doc(courierId).get();
+    const courier = courierSnap.exists ? courierSnap.data() : null;
+    if (!courier || String(courier.email || '').trim().toLowerCase() !== String(user.email).trim().toLowerCase()) {
+      return next(); // Los handlers mantienen su respuesta habitual para cuentas que no son repartidoras.
+    }
+    if (user.email_verified !== true) {
+      return res.status(403).json({
+        success: false,
+        code: 'EMAIL_NOT_VERIFIED',
+        error: 'Verificá el correo de la cuenta de repartidor para acceder a las entregas.'
+      });
+    }
+    return next();
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) {
+      return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    }
+    console.error('No se pudo validar el correo del repartidor:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo validar la sesión.' });
+  }
+}
+
+app.use('/api/admin', requireVerifiedAdminEmail);
+app.use('/api/courier', requireVerifiedCourierEmail);
 
 function notifyAdminsNewOrder(orderId, order) {
   if (!firestore || !firebaseMessaging) return;
