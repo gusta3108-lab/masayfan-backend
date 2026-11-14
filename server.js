@@ -19,7 +19,7 @@ const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 
 const app = express();
@@ -829,7 +829,7 @@ app.post('/api/admin/test-order', async (req, res) => {
 app.post('/api/admin/orders/:orderId/status', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
-    await authenticatedAdmin(req);
+    const admin = await authenticatedAdmin(req);
     const orderId = String(req.params.orderId || '');
     const newStatus = String(req.body?.status || '');
     const allowed = ['nuevo', 'preparacion', 'listo', 'finalizado', 'rechazado'];
@@ -865,6 +865,36 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
       if (newStatus === 'rechazado' && !canRejectOrder(order)) {
         throw new Error('PAYMENT_REFUND_REQUIRED');
       }
+      let deliveryClosureUpdate = {};
+      let pendingOfferRef = null;
+      let pendingOfferSnap = null;
+      if (newStatus === 'rechazado') {
+        const closureEntry = buildDeliveryClosureHistoryEntry(order.delivery, admin.email, 'order_rejected');
+        const history = Array.isArray(order.deliveryHistory) ? order.deliveryHistory : [];
+        if (closureEntry) {
+          deliveryClosureUpdate = {
+            delivery: {
+              ...order.delivery,
+              status: 'cancelled',
+              cancelledAt: FieldValue.serverTimestamp(),
+              cancellationReason: 'order_rejected'
+            },
+            deliveryHistory: [...history.slice(-19), closureEntry]
+          };
+        }
+        if (order.deliveryOfferId && order.deliveryOfferStatus === 'pending') {
+          pendingOfferRef = firestore.collection('delivery_offers').doc(String(order.deliveryOfferId));
+          pendingOfferSnap = await transaction.get(pendingOfferRef);
+        }
+        if (pendingOfferSnap?.exists && pendingOfferSnap.data().status === 'pending') {
+          transaction.update(pendingOfferRef, {
+            status: 'cancelled',
+            respondedAt: FieldValue.serverTimestamp(),
+            cancellationReason: 'order_rejected'
+          });
+        }
+        deliveryClosureUpdate.deliveryOfferStatus = 'cancelled';
+      }
       if (newStatus === 'rechazado'
         && order.inventoryCommitted === true && order.inventoryRestored !== true) {
         const requirements = stockRequirements(order.items || []);
@@ -885,11 +915,12 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
           }
           transaction.update(refs[index], { stockQuantity: quantity + item.qty });
         });
-        transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString() });
+        transaction.update(orderRef, { status: newStatus, inventoryRestored: true, inventoryRestoredAt: new Date().toISOString(), ...deliveryClosureUpdate });
       } else {
         transaction.update(orderRef, {
           status: newStatus,
-          ...(newStatus === 'finalizado' ? { completedAt: new Date().toISOString() } : {})
+          ...(newStatus === 'finalizado' ? { completedAt: new Date().toISOString() } : {}),
+          ...deliveryClosureUpdate
         });
       }
     });

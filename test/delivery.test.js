@@ -76,6 +76,25 @@ test('courier cannot advance delivery after an order leaves the ready state; rep
   assert.equal(canCourierUpdateOrderStatus('finalizado', 'delivered', 'delivered'), true);
 });
 
+test('rejecting an assigned, en-route, or issue delivery records closure history', () => {
+  const { buildDeliveryClosureHistoryEntry } = require('../lib/delivery');
+  for (const status of ['assigned', 'en_camino', 'issue']) {
+    const entry = buildDeliveryClosureHistoryEntry({
+      courierId: 'courier-1',
+      courierName: 'Repartidor',
+      status,
+      issueReason: status === 'issue' ? 'Vehículo averiado' : '',
+      issueReportedBy: 'courier@example.com'
+    }, 'admin@example.com', 'order_rejected', '2026-11-14T12:00:00.000Z');
+    assert.equal(entry.previousCourierId, 'courier-1');
+    assert.equal(entry.previousDeliveryStatus, status);
+    assert.equal(entry.resolution, 'order_rejected');
+    assert.equal(entry.resolvedBy, 'admin@example.com');
+  }
+  assert.equal(buildDeliveryClosureHistoryEntry({ status: 'delivered' }, 'admin@example.com'), null);
+  assert.equal(buildDeliveryClosureHistoryEntry({ status: 'assigned' }, 'admin@example.com'), null);
+});
+
 test('delivery issue resolution preserves the previous courier, reason, and audit metadata', () => {
   const { buildDeliveryIssueHistoryEntry } = require('../lib/delivery');
   const entry = buildDeliveryIssueHistoryEntry({
