@@ -1289,16 +1289,17 @@ app.post('/api/orders/:orderId/chat', async (req, res) => {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     const orderId = String(req.params.orderId || '');
-    const message = String(req.body?.message || '').replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '').trim();
+    const message = String(req.body?.message || '').trim();
     if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) return res.status(400).json({ success: false, error: 'Pedido inválido.' });
     if (!message || message.length > 1000) return res.status(400).json({ success: false, error: 'El mensaje debe tener entre 1 y 1000 caracteres.' });
     const orderRef = firestore.collection('pedidos').doc(orderId);
     const messageRef = firestore.collection('order_chats').doc(orderId).collection('messages').doc();
+    let participant;
     await firestore.runTransaction(async transaction => {
       const orderSnap = await transaction.get(orderRef);
       if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
       const order = orderSnap.data();
-      const participant = await resolveOrderChatParticipant(user, order);
+      participant = await resolveOrderChatParticipant(user, order);
       if (!participant.canSend || !order.delivery?.courierId
         || !['assigned', 'en_camino', 'issue'].includes(String(order.delivery?.status || '').toLowerCase())
         || ['rechazado', 'cancelado', 'finalizado'].includes(String(order.status || '').toLowerCase())
