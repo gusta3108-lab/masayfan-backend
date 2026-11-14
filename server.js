@@ -19,6 +19,7 @@ const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
+const { saveCourierProfileSafely, markCourierAssignment } = require('./lib/courier-assignment-guard');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
@@ -981,27 +982,16 @@ app.post('/api/admin/couriers', async (req, res) => {
     const courier = normalizeCourier(req.body || {});
     const id = courierDocumentId(courier.email);
     const ref = firestore.collection('repartidores').doc(id);
-    const previous = await ref.get();
     const active = req.body?.active === false ? false : true;
-    if (!active && previous.exists) {
-      const assignedOrders = await firestore.collection('pedidos')
-        .where('delivery.courierId', '==', id).get();
-      if (hasActiveCourierDeliveries(assignedOrders.docs.map(doc => doc.data()))) {
-        return res.status(409).json({
-          success: false,
-          code: 'COURIER_HAS_ACTIVE_DELIVERIES',
-          error: 'No se puede desactivar este repartidor mientras tenga entregas asignadas o en camino. Reasigná o completá esos pedidos primero.'
-        });
-      }
-    }
-    await ref.set({
-      ...courier,
+    const existed = await saveCourierProfileSafely({
+      firestore,
+      courierRef: ref,
+      courier,
       active,
-      createdAt: previous.exists ? previous.data().createdAt || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-      updatedBy: String(admin.email).toLowerCase()
-    }, { merge: true });
-    return res.status(previous.exists ? 200 : 201).json({ success: true, courier: { id, ...courier, active } });
+      adminEmail: admin.email,
+      FieldValue
+    });
+    return res.status(existed ? 200 : 201).json({ success: true, courier: { id, ...courier, active } });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID' || error.message === 'COURIER_NAME_INVALID'
       || error.message === 'COURIER_PHONE_INVALID' || error.message === 'COURIER_WHATSAPP_INVALID') {
@@ -1073,6 +1063,7 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
           ...(issueHistory ? { deliveryHistory: [...previousHistory.slice(-19), issueHistory] } : {})
         });
       });
+      markCourierAssignment(transaction, courierRef, FieldValue);
       return { order, courier, delivery: { ...order.delivery, courierId, courierName: courier.name, status: 'assigned', routeOrder: assignment.routeOrder } };
     });
     const whatsappUrl = buildCourierWhatsAppUrl(result.courier, orderId, result.order);
@@ -1166,6 +1157,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
           ...(issueHistory ? { deliveryHistory: [...previousHistory.slice(-19), issueHistory] } : {})
         });
       });
+      markCourierAssignment(transaction, courierRef, FieldValue);
       return { courier, assignments, routeOrders };
     });
     const routeSegments = buildGoogleMapsRouteSegments(result.routeOrders);
@@ -2206,6 +2198,7 @@ app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
         deliveryOfferAcceptedAt: FieldValue.serverTimestamp(),
         ...(issueHistory ? { deliveryHistory: [...previousHistory.slice(-19), issueHistory] } : {})
       });
+      markCourierAssignment(transaction, courierRef, FieldValue);
       return { accepted: true, amount: frozen.courierFee, storeAmount: frozen.storeAmount, routeOrder: assignedOrder.routeOrder };
     });
     if (result.expired) return res.status(409).json({ success: false, error: 'La oferta venció. Administración puede volver a ofrecer el pedido.' });
