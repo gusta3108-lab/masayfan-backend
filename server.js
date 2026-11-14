@@ -1464,7 +1464,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
       });
     });
     if (orderCreated) notifyAdminsNewOrder(finalOrderId, orderData);
-    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, order_number: finalDisplayOrderNumber || null, replayed });
+    return res.status(replayed ? 200 : 201).json({ success: true, order_id: finalOrderId, order_number: finalDisplayOrderNumber || ('Ref. ' + String(finalOrderId).slice(-4)), replayed });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message);
     if (error.message === 'ADMIN_CANNOT_PURCHASE') return res.status(403).json({ success: false, error: 'Las cuentas administradoras no pueden realizar compras.' });
