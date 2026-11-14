@@ -21,11 +21,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
-      - name: Install dependencies without running package scripts
-        run: npm install --ignore-scripts --no-audit
+          node-version: 24.14.1
       - name: Record npm version
         run: npm --version
+      - name: Install dependencies without running package scripts
+        run: npm install --ignore-scripts --no-audit
       - name: Audit production and development dependency tree
         run: |
           npm audit --json > npm-audit.json || true
