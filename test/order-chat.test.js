@@ -36,7 +36,7 @@ function fakeFirestore({ admins = [], couriers = {} } = {}) {
 
 test('the order owner can access their private chat by normalized account email', async () => {
   const participant = await resolveOrderChatParticipant({
-    user: { email: ' CLIENTE@example.com ' },
+    user: { email_verified: true, email: ' CLIENTE@example.com ' },
     order: { userEmail: 'cliente@example.com', clientName: '  Ana   Pérez ' },
     firestore: fakeFirestore(),
     courierDocumentId
@@ -46,7 +46,7 @@ test('the order owner can access their private chat by normalized account email'
 
 test('participant display names never expose phone-like digit sequences', async () => {
   const participant = await resolveOrderChatParticipant({
-    user: { email: 'cliente@example.com' },
+    user: { email_verified: true, email: 'cliente@example.com' },
     order: { userEmail: 'cliente@example.com', clientName: 'Ana Pérez +54 9 11 2345-6789' },
     firestore: fakeFirestore(),
     courierDocumentId
@@ -57,7 +57,7 @@ test('participant display names never expose phone-like digit sequences', async 
 test('a different customer cannot read or send messages in another order chat', async () => {
   await assert.rejects(
     resolveOrderChatParticipant({
-      user: { email: 'other@example.com' },
+      user: { email_verified: true, email: 'other@example.com' },
       order: { userEmail: 'owner@example.com', delivery: {} },
       firestore: fakeFirestore(),
       courierDocumentId
@@ -70,7 +70,7 @@ test('only the active courier assigned to this exact order can access its chat',
   const email = 'courier@example.com';
   const id = courierDocumentId(email);
   const participant = await resolveOrderChatParticipant({
-    user: { email },
+    user: { email, email_verified: true },
     order: { delivery: { courierId: id, courierName: 'Repartidor asignado' } },
     firestore: fakeFirestore({ couriers: { [id]: { email, name: 'Perfil', active: true } } }),
     courierDocumentId
@@ -90,7 +90,7 @@ test('inactive, mismatched or unassigned couriers are denied', async () => {
   for (const item of cases) {
     await assert.rejects(
       resolveOrderChatParticipant({
-        user: { email },
+        user: { email, email_verified: true },
         order: { delivery: { courierId: item.assignedId } },
         firestore: fakeFirestore({ couriers: item.courier ? { [id]: item.courier } : {} }),
         courierDocumentId
@@ -102,7 +102,7 @@ test('inactive, mismatched or unassigned couriers are denied', async () => {
 
 test('administrators can supervise chat but cannot send messages', async () => {
   const participant = await resolveOrderChatParticipant({
-    user: { email: 'ADMIN@example.com' },
+    user: { email_verified: true, email: 'ADMIN@example.com' },
     order: {},
     firestore: fakeFirestore({ admins: ['admin@example.com'] }),
     courierDocumentId
@@ -125,7 +125,7 @@ test('message authorization reads admin and courier membership inside the sendin
     }
   };
   const participant = await resolveOrderChatParticipant({
-    user: { email },
+    user: { email, email_verified: true },
     order: { delivery: { courierId: id } },
     firestore,
     courierDocumentId,
