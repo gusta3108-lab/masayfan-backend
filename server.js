@@ -2028,23 +2028,25 @@ app.post('/api/courier/profile', async (req, res) => {
     const user = await authenticatedUser(req);
     const courierId = courierDocumentId(user.email);
     const ref = firestore.collection('repartidores').doc(courierId);
-    const snap = await ref.get();
-    if (!snap.exists || snap.data().active === false
-      || String(snap.data().email || '').trim().toLowerCase() !== String(user.email || '').trim().toLowerCase()) {
-      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
-    }
     const profile = normalizeCourier({
       name: req.body?.name,
       email: user.email,
       phone: req.body?.phone,
       whatsapp: req.body?.whatsapp
     });
-    await ref.set({
-      name: profile.name,
-      phone: profile.phone,
-      whatsapp: profile.whatsapp,
-      profileUpdatedAt: FieldValue.serverTimestamp()
-    }, { merge: true });
+    await firestore.runTransaction(async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists || snap.data().active === false
+        || String(snap.data().email || '').trim().toLowerCase() !== String(user.email || '').trim().toLowerCase()) {
+        throw new Error('COURIER_NOT_AVAILABLE');
+      }
+      transaction.update(ref, {
+        name: profile.name,
+        phone: profile.phone,
+        whatsapp: profile.whatsapp,
+        profileUpdatedAt: FieldValue.serverTimestamp()
+      });
+    });
     return res.json({ success: true, profile: {
       name: profile.name,
       email: String(user.email || ''),
@@ -2055,6 +2057,7 @@ app.post('/api/courier/profile', async (req, res) => {
     if (['COURIER_EMAIL_INVALID', 'COURIER_NAME_INVALID', 'COURIER_PHONE_INVALID', 'COURIER_WHATSAPP_INVALID'].includes(error.message)) {
       return res.status(400).json({ success: false, error: 'Revisá nombre, teléfono y WhatsApp internacional.' });
     }
+    if (error.message === 'COURIER_NOT_AVAILABLE') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error guardando perfil del repartidor:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudo guardar tu perfil.' });
