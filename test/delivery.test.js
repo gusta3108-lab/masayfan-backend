@@ -76,6 +76,29 @@ test('courier cannot advance delivery after an order leaves the ready state; rep
   assert.equal(canCourierUpdateOrderStatus('finalizado', 'delivered', 'delivered'), true);
 });
 
+test('delivery issue resolution preserves the previous courier, reason, and audit metadata', () => {
+  const { buildDeliveryIssueHistoryEntry } = require('../lib/delivery');
+  const entry = buildDeliveryIssueHistoryEntry({
+    status: 'issue',
+    courierId: 'old-courier',
+    courierName: 'Repartidor anterior',
+    issueReason: 'La moto tuvo un desperfecto',
+    issueAt: '2026-11-14T10:00:00.000Z',
+    issueReportedBy: 'OLD@example.com'
+  }, 'ADMIN@example.com', 'reassigned', '2026-11-14T10:30:00.000Z');
+  assert.deepEqual(entry, {
+    previousCourierId: 'old-courier',
+    previousCourierName: 'Repartidor anterior',
+    issueReason: 'La moto tuvo un desperfecto',
+    issueAt: '2026-11-14T10:00:00.000Z',
+    issueReportedBy: 'old@example.com',
+    resolution: 'reassigned',
+    resolvedBy: 'admin@example.com',
+    resolvedAt: '2026-11-14T10:30:00.000Z'
+  });
+  assert.equal(buildDeliveryIssueHistoryEntry({ status: 'assigned' }, 'admin@example.com'), null);
+});
+
 test('courier cannot be deactivated while active deliveries remain assigned', () => {
   assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'assigned' } }]), true);
   assert.equal(hasActiveCourierDeliveries([{ delivery: { status: 'en_camino' } }]), true);
