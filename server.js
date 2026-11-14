@@ -991,8 +991,20 @@ app.get('/api/courier/orders', async (req, res) => {
       .filter(order => ['assigned', 'en_camino'].includes(order.status))
       .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
     const completedCount = allAssignedOrders.filter(order => order.status === 'delivered').length;
-    const routeSegments = buildGoogleMapsRouteSegments(orders);
-    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, completedCount, routeSegments });
+    const pickupAddress = String(process.env.STORE_PICKUP_ADDRESS || '').trim();
+    const pickupLat = Number(process.env.STORE_PICKUP_LAT);
+    const pickupLon = Number(process.env.STORE_PICKUP_LON);
+    const pickupCoordinatesValid = Number.isFinite(pickupLat) && Math.abs(pickupLat) <= 90
+      && Number.isFinite(pickupLon) && Math.abs(pickupLon) <= 180;
+    const pickup = {
+      address: pickupAddress || null,
+      location: pickupCoordinatesValid ? { lat: pickupLat, lon: pickupLon } : null
+    };
+    const pickedUpOrders = orders.filter(order => order.status === 'en_camino');
+    const routeSegments = pickupCoordinatesValid && pickedUpOrders.length
+      ? buildGoogleMapsRouteSegments(pickedUpOrders, 4, pickupLat + ',' + pickupLon)
+      : [];
+    return res.json({ success: true, courier: { name: courierSnap.data().name }, pickup, orders, completedCount, routeSegments });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
@@ -1122,10 +1134,10 @@ app.post('/api/courier/route/optimize', async (req, res) => {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     const courierId = courierDocumentId(user.email);
-    const lat = Number(req.body?.origin?.lat);
-    const lon = Number(req.body?.origin?.lon);
+    const lat = Number(process.env.STORE_PICKUP_LAT);
+    const lon = Number(process.env.STORE_PICKUP_LON);
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
-      return res.status(400).json({ success: false, error: 'No se recibió una ubicación válida.' });
+      return res.status(409).json({ success: false, error: 'La ubicación GPS del punto de retiro todavía no está configurada. Se mantiene el orden actual.' });
     }
     const courierRef = firestore.collection('repartidores').doc(courierId);
     const [courierSnap, assignedSnapshot] = await Promise.all([
@@ -1137,7 +1149,7 @@ app.post('/api/courier/route/optimize', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
     const activeDocs = assignedSnapshot.docs.filter(doc =>
-      ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')));
+      String(doc.data().delivery?.status || '') === 'en_camino');
     if (!activeDocs.length) return res.json({ success: true, routeSegments: [], stopCount: 0 });
     if (activeDocs.length > 50) return res.status(409).json({ success: false, error: 'Hay más de 50 entregas activas. Dividí el recorrido en dos tandas.' });
     const refs = activeDocs.map(doc => doc.ref);
@@ -1147,12 +1159,13 @@ app.post('/api/courier/route/optimize', async (req, res) => {
       deliveryLocation: doc.data().deliveryLocation || null
     }));
     const optimizationApplied = hasCompleteDeliveryCoordinates(routeOrders);
+    if (!optimizationApplied) return res.status(409).json({ success: false, error: 'Faltan coordenadas exactas confirmadas en uno o más pedidos. Se mantiene el orden actual.' });
     const optimized = optimizeDeliveryStops(routeOrders, { lat, lon });
     await firestore.runTransaction(async transaction => {
       const fresh = await Promise.all(refs.map(ref => transaction.get(ref)));
       fresh.forEach((snap, index) => {
         if (!snap.exists || snap.data().delivery?.courierId !== courierId
-          || !['assigned', 'en_camino'].includes(String(snap.data().delivery?.status || ''))) {
+          || String(snap.data().delivery?.status || '') !== 'en_camino') {
           throw new Error('ROUTE_CHANGED');
         }
       });
@@ -1163,7 +1176,7 @@ app.post('/api/courier/route/optimize', async (req, res) => {
         });
       });
     });
-    const routeSegments = buildGoogleMapsRouteSegments(optimized);
+    const routeSegments = buildGoogleMapsRouteSegments(optimized, 4, lat + ',' + lon);
     return res.json({
       success: true,
       stopCount: optimized.length,
