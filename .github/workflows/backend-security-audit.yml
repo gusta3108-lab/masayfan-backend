@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, security/dependency-audit-2026]
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:
