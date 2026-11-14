@@ -304,8 +304,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   }
   if (validationFailure) return recordApprovedPaymentValidationIncident(validationFailure, pending);
 
-  try {
-    let orderCreated = false;
+  let orderCreated = false;
     await firestore.runTransaction(async transaction => {
       orderCreated = false;
       const [freshPending, existingOrder, validationIncident] = await Promise.all([
@@ -337,7 +336,6 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     });
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
     return { verified: true, alreadyRegistered: false };
-  }
 }
 
 app.get('/api/admin/payment-incidents', async (req, res) => {
