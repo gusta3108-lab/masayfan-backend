@@ -775,7 +775,13 @@ app.post('/api/admin/test-order', async (req, res) => {
       clientName: 'PRUEBA DE AUDIO',
       clientPhone: '—',
       address: testAddress,
+      // Guardar el punto en el formato canónico y en alias compatibles con
+      // clientes antiguos/serializadores que esperan otros nombres de campo.
       deliveryLocation: { lat: testLat, lon: testLon },
+      location: { lat: testLat, lon: testLon },
+      coordinates: { latitude: testLat, longitude: testLon },
+      latitude: testLat,
+      longitude: testLon,
       locationLabel: 'Ubicación aleatoria de prueba · no es domicilio real',
       notes: 'ESTE PEDIDO ES UNA PRUEBA. No corresponde a una venta ni genera cobros. La dirección y el punto GPS son aleatorios dentro de Lanús y solo sirven para probar el minimapa.',
       items: [{ id: 'test-audio', name: 'Prueba de notificación', price: 0, qty: 1, options: '', description: 'Pedido ficticio para comprobar recepción y audio.' }],
