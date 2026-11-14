@@ -63,7 +63,7 @@ test('courier order view includes the accepted fee and cash handoff state', () =
   assert.equal(missing.delivery.storeCashStatus, '');
 });
 
-test('delivery status only advances assigned -> on the way -> delivered', () => {
+test('delivery status only advances assigned -> pickup confirmed (en_camino) -> delivered', () => {
   assert.equal(canTransitionDeliveryStatus('assigned', 'en_camino'), true);
   assert.equal(canTransitionDeliveryStatus('en_camino', 'delivered'), true);
   assert.equal(canTransitionDeliveryStatus('assigned', 'delivered'), false);
@@ -152,6 +152,8 @@ test('delivery route is optimized by nearest straight-line stop when all address
   assert.deepEqual(optimized.map(order => order.routeOrder), [1, 2, 3]);
   assert.match(buildGoogleMapsRouteUrl(optimized), /^https:\/\/www\.google\.com\/maps\/dir\/\?api=1/);
   assert.equal(buildGoogleMapsRouteSegments(optimized).length, 1);
+  const privateStoreRoute = buildGoogleMapsRouteSegments(optimized, 4, '-34.7,-58.5');
+  assert.match(privateStoreRoute[0].url, /origin=-34\.7%2C-58\.5/);
 });
 
 test('route optimization reports when any stop lacks valid coordinates', () => {
