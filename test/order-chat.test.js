@@ -70,7 +70,7 @@ test('only the active courier assigned to this exact order can access its chat',
   const email = 'courier@example.com';
   const id = courierDocumentId(email);
   const participant = await resolveOrderChatParticipant({
-    user: { email },
+    user: { email, email_verified: true },
     order: { delivery: { courierId: id, courierName: 'Repartidor asignado' } },
     firestore: fakeFirestore({ couriers: { [id]: { email, name: 'Perfil', active: true } } }),
     courierDocumentId
