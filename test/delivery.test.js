@@ -9,6 +9,7 @@ const {
   canCourierUpdateOrderStatus,
   hasActiveCourierDeliveries,
   buildDeliveryIssueHistoryEntry,
+  buildDeliveryClosureHistoryEntry,
   buildCourierOrder,
   hasCompleteDeliveryCoordinates,
   buildCourierWhatsAppUrl
@@ -240,4 +241,22 @@ test('delivery issue reassignment preserves courier, reason and audit metadata',
     resolvedAt: '2026-11-14T10:30:00.000Z'
   });
   assert.equal(buildDeliveryIssueHistoryEntry({ status: 'assigned' }, 'admin@example.com'), null);
+});
+
+test('rejecting an order closes active delivery and preserves its closure audit entry', () => {
+  for (const status of ['assigned', 'en_camino', 'issue']) {
+    const entry = buildDeliveryClosureHistoryEntry({
+      courierId: 'courier-1',
+      courierName: 'Repartidor',
+      status,
+      issueReason: status === 'issue' ? 'Vehículo averiado' : '',
+      issueReportedBy: 'courier@example.com'
+    }, 'admin@example.com', 'order_rejected', '2026-11-14T12:00:00.000Z');
+    assert.equal(entry.previousCourierId, 'courier-1');
+    assert.equal(entry.previousDeliveryStatus, status);
+    assert.equal(entry.resolution, 'order_rejected');
+    assert.equal(entry.resolvedBy, 'admin@example.com');
+  }
+  assert.equal(buildDeliveryClosureHistoryEntry({ status: 'delivered', courierId: 'c1' }, 'admin@example.com'), null);
+  assert.equal(buildDeliveryClosureHistoryEntry({ status: 'assigned' }, 'admin@example.com'), null);
 });
