@@ -1,0 +1,31 @@
+name: Backend dependency security audit
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Generate lockfile without running package scripts
+        run: npm install --package-lock-only --ignore-scripts --no-audit
+      - name: Audit production and development dependency tree
+        run: |
+          npm audit --json > npm-audit.json || true
+          node -e "const r=require('./npm-audit.json'); console.log(JSON.stringify({metadata:r.metadata, vulnerabilities:r.vulnerabilities}, null, 2)); if ((r.metadata?.vulnerabilities?.critical || 0) + (r.metadata?.vulnerabilities?.high || 0) + (r.metadata?.vulnerabilities?.moderate || 0) > 0) process.exitCode=1"
