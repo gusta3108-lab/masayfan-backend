@@ -54,9 +54,12 @@ try {
     firestore = getFirestore(firebaseApp);
     firebaseAuth = getAuth(firebaseApp);
     firebaseMessaging = getMessaging(firebaseApp);
+    console.info('Firebase Admin inicializado correctamente para el proyecto masayfantasias.');
+  } else {
+    console.error('Firebase Admin no inicializado: falta la variable FIREBASE_SERVICE_ACCOUNT_JSON en el entorno del servidor.');
   }
 } catch (error) {
-  console.error('No se pudo inicializar Firebase Admin. Revisá FIREBASE_SERVICE_ACCOUNT_JSON.');
+  console.error('No se pudo inicializar Firebase Admin:', error.name || 'Error', error.message || 'sin detalle');
 }
 
 function requireFirebaseServices(res) {
