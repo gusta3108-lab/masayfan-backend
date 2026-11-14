@@ -19,7 +19,7 @@ const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
-const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
+const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
 
@@ -1035,7 +1035,12 @@ app.post('/api/admin/orders/:orderId/assign-courier', async (req, res) => {
           assignedAt: FieldValue.serverTimestamp(),
           assignedBy: String(admin.email).toLowerCase()
         };
-        transaction.update(orderRef, { delivery });
+        const issueHistory = buildDeliveryIssueHistoryEntry(order.delivery, admin.email, 'reassigned');
+        const previousHistory = Array.isArray(order.deliveryHistory) ? order.deliveryHistory : [];
+        transaction.update(orderRef, {
+          delivery,
+          ...(issueHistory ? { deliveryHistory: [...previousHistory.slice(-19), issueHistory] } : {})
+        });
       });
       return { order, courier, delivery: { ...order.delivery, courierId, courierName: courier.name, status: 'assigned', routeOrder: assignment.routeOrder } };
     });
@@ -1123,7 +1128,12 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
           assignedAt: FieldValue.serverTimestamp(),
           assignedBy: String(admin.email).toLowerCase()
         };
-        transaction.update(orderRef, { delivery });
+        const issueHistory = buildDeliveryIssueHistoryEntry(order.delivery, admin.email, 'reassigned');
+        const previousHistory = Array.isArray(order.deliveryHistory) ? order.deliveryHistory : [];
+        transaction.update(orderRef, {
+          delivery,
+          ...(issueHistory ? { deliveryHistory: [...previousHistory.slice(-19), issueHistory] } : {})
+        });
       });
       return { courier, assignments, routeOrders };
     });
@@ -2123,6 +2133,8 @@ app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
       const route = appendDeliveryStops(existing, [{ orderId: offer.orderId, ...order }]);
       const assignedOrder = route.find(item => item.orderId === offer.orderId);
       const frozen = acceptCourierOffer(order, offer);
+      const issueHistory = buildDeliveryIssueHistoryEntry(order.delivery, offer.offeredBy || '', 'reassigned');
+      const previousHistory = Array.isArray(order.deliveryHistory) ? order.deliveryHistory : [];
       transaction.update(offerRef, { status: 'accepted', respondedAt: FieldValue.serverTimestamp() });
       existing.forEach(item => transaction.update(firestore.collection('pedidos').doc(item.orderId), { 'delivery.routeOrder': route.find(stop => stop.orderId === item.orderId).routeOrder }));
       transaction.update(orderRef, {
@@ -2133,7 +2145,8 @@ app.post('/api/courier/offers/:offerId/respond', async (req, res) => {
           ...frozen
         },
         deliveryOfferStatus: 'accepted',
-        deliveryOfferAcceptedAt: FieldValue.serverTimestamp()
+        deliveryOfferAcceptedAt: FieldValue.serverTimestamp(),
+        ...(issueHistory ? { deliveryHistory: [...previousHistory.slice(-19), issueHistory] } : {})
       });
       return { accepted: true, amount: frozen.courierFee, storeAmount: frozen.storeAmount, routeOrder: assignedOrder.routeOrder };
     });
