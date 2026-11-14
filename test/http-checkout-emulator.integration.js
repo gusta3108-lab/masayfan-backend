@@ -136,17 +136,18 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   const adminSignupData = await adminSignup.json();
   const { getAuth } = require('firebase-admin/auth');
   await getAuth().updateUser(adminSignupData.localId, { emailVerified: true });
-  const adminCustomToken = await getAuth().createCustomToken(adminSignupData.localId);
+  // Tras actualizar el usuario mediante Admin SDK, iniciar sesión de nuevo con contraseña
+  // fuerza al Auth Emulator a emitir un ID token con email_verified actualizado.
   const adminSignIn = await fetch(
     'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
-      '/identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=emulator-api-key',
+      '/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-api-key',
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: adminCustomToken, returnSecureToken: true })
+      body: JSON.stringify({ email: adminEmail, password: 'EmulatorPass123!', returnSecureToken: true })
     }
   );
-  assert.equal(adminSignIn.status, 200, 'Auth Emulator debe emitir un token nuevo para el administrador verificado');
+  assert.equal(adminSignIn.status, 200, 'Auth Emulator debe emitir un token de contraseña para el administrador verificado');
   adminIdToken = (await adminSignIn.json()).idToken;
 
   await firestore.collection('productos').doc(productId).set({
