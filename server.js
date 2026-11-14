@@ -1167,7 +1167,6 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
     const whatsappOrders = result.routeOrders.map(order => ({
       orderId: order.orderId,
       clientName: order.clientName,
-      clientPhone: order.clientPhone,
       address: order.address
     }));
     const whatsappUrl = buildBatchCourierWhatsAppUrl(result.courier, whatsappOrders, routeUrl);
