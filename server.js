@@ -87,8 +87,12 @@ async function requireVerifiedAdminEmail(req, res, next) {
   if (!requireFirebaseServices(res)) return;
   try {
     const user = await authenticatedUser(req);
-    const email = String(user.email).trim().toLowerCase();
-    const adminSnap = await firestore.collection('administradores').doc(email).get();
+    const rawEmail = String(user.email).trim();
+    const email = rawEmail.toLowerCase();
+    let adminSnap = await firestore.collection('administradores').doc(email).get();
+    if (!adminSnap.exists && rawEmail !== email) {
+      adminSnap = await firestore.collection('administradores').doc(rawEmail).get();
+    }
     if (!adminSnap.exists) return next();
     if (user.email_verified !== true) {
       return res.status(403).json({
