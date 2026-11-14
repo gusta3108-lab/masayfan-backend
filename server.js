@@ -174,7 +174,6 @@ async function priceCartItems(items) {
     if (money(item.price) !== unitPrice) throw new Error('El precio de un producto cambió. Actualizá el carrito e intentá nuevamente.');
     pricedItems.push({
       id: itemId,
-      stockProductId: item.stockProductId || null,
       name,
       price: unitPrice,
       qty,
@@ -398,21 +397,20 @@ app.post('/api/admin/payment-incidents/:collection/:incidentId/retry-approved-pa
       return res.status(409).json({ success: false, error: 'Esta incidencia no cumple los requisitos para revalidar un pago aprobado.' });
     }
 
-    // Vuelve a consultar y validar el pago en Mercado Pago. Si la reserva original
-    // ya venció, solo consume stock NO reservado y únicamente si sigue disponible.
+    // Vuelve a consultar el pago en Mercado Pago y valida sus datos antes de registrar el pedido.
     const result = await registerApprovedPayment(
       String(incident.paymentId),
       String(incident.externalReference),
       null,
       null,
-      { allowAvailableStockAfterReservationRelease: true }
+      {}
     );
     if (!result.verified || result.needsAdminReview) {
       return res.status(409).json({
         success: false,
         needsAdminReview: Boolean(result.needsAdminReview),
         error: result.needsAdminReview
-          ? 'El pago sigue aprobado, pero el inventario todavía no permite completar el pedido. La incidencia continúa abierta.'
+          ? 'El pago sigue aprobado, pero sus datos todavía requieren revisión. La incidencia continúa abierta.'
           : 'No se pudo validar el pago nuevamente con Mercado Pago. La incidencia continúa abierta.'
       });
     }
@@ -709,7 +707,7 @@ app.post('/api/admin/orders/:orderId/status', async (req, res) => {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'INVALID_TEST_ORDER_TRANSITION') return res.status(409).json({ success: false, error: 'La prueba ya fue resuelta o el estado solicitado no es válido.' });
     if (error.message === 'INVALID_STATUS_TRANSITION') return res.status(409).json({ success: false, error: 'Ese cambio de estado no está permitido. Los pedidos entregados o rechazados no se pueden reabrir ni rechazar nuevamente.' });
-    if (error.message === 'PAYMENT_REFUND_REQUIRED') return res.status(409).json({ success: false, error: 'Este pedido fue cobrado con Mercado Pago. Primero realizá la devolución desde Mercado Pago y esperá que el pedido muestre DEVUELTO; recién entonces podrás rechazarlo y devolver el stock. Si figura CONTRACARGO, requiere revisión manual.' });
+    if (error.message === 'PAYMENT_REFUND_REQUIRED') return res.status(409).json({ success: false, error: 'Este pedido fue cobrado con Mercado Pago. Primero realizá la devolución desde Mercado Pago y esperá que el pedido muestre DEVUELTO; recién entonces podrás rechazarlo y Si figura CONTRACARGO, requiere revisión manual.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para modificar pedidos.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error actualizando estado del pedido:', error.message);
@@ -1651,8 +1649,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
               checkoutRequestId: idempotency.ref.id,
               total,
               currency: 'ARS',
-              stockReservationExpiresAt: reservationEnd.toISOString(),
-              error: String(preferenceError.message || 'Error desconocido').slice(0, 500),
+                     error: String(preferenceError.message || 'Error desconocido').slice(0, 500),
               createdAt: FieldValue.serverTimestamp()
             });
           }
@@ -1735,13 +1732,8 @@ app.post('/api/webhook', async (req, res) => {
     if (!reference) return res.sendStatus(200);
     if (payment.status !== 'approved') {
       const paymentStatus = String(payment.status || '');
-      if (['cancelled', 'rejected'].includes(paymentStatus)) {
-        // Mercado Pago confirmó que este intento no fue aprobado: ya es seguro
-        // liberar una reserva retenida por la creación ambigua de la preferencia.
-      }
       // Una devolución o contracargo posterior a la aprobación debe reflejarse
-      // en el pedido existente. No se repone stock automáticamente: el producto
-      // puede haber sido preparado o entregado y requiere decisión administrativa.
+      // en el pedido existente y requiere decisión administrativa.
       if (['refunded', 'charged_back'].includes(paymentStatus)) {
         await updateReversedPayment(paymentId, reference, paymentStatus);
       }
