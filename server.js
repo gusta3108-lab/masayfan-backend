@@ -21,6 +21,7 @@ const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifica
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet } = require('./lib/courier-wallet');
+const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
 
 const app = express();
 app.use(cors({
@@ -1131,7 +1132,6 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
     const whatsappOrders = result.routeOrders.map(order => ({
       orderId: order.orderId,
       clientName: order.clientName,
-      clientPhone: order.clientPhone,
       address: order.address
     }));
     const whatsappUrl = buildBatchCourierWhatsAppUrl(result.courier, whatsappOrders, routeUrl);
@@ -1190,6 +1190,111 @@ app.get('/api/courier/orders', async (req, res) => {
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
     console.error('Error consultando entregas del repartidor:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudieron cargar tus entregas.' });
+  }
+});
+
+
+// CHAT PRIVADO POR PEDIDO: solo cliente titular, repartidor asignado y administración en lectura.
+app.get('/api/orders/:orderId/chat', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) {
+      return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    }
+    const orderSnap = await firestore.collection('pedidos').doc(orderId).get();
+    if (!orderSnap.exists) return res.status(404).json({ success: false, error: 'No se encontró el pedido.' });
+    const order = orderSnap.data();
+    const participant = await resolveOrderChatParticipant({ user, order, firestore, courierDocumentId });
+    const closed = isOrderChatClosed(order);
+    const snapshot = await firestore.collection('order_chats').doc(orderId).collection('messages')
+      .orderBy('createdAt', 'desc').limit(100).get();
+    const messages = snapshot.docs.map(doc => {
+      const value = doc.data();
+      return {
+        id: doc.id,
+        senderRole: String(value.senderRole || ''),
+        senderName: String(value.senderName || ''),
+        text: String(value.text || ''),
+        createdAt: value.createdAt?.toDate ? value.createdAt.toDate().toISOString() : null
+      };
+    }).reverse();
+    return res.json({
+      success: true,
+      messages,
+      role: participant.role,
+      canSend: participant.canSend && !closed,
+      closed
+    });
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) {
+      return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    }
+    if (error.message === 'CHAT_FORBIDDEN') {
+      return res.status(403).json({ success: false, error: 'No tenés acceso al chat de este pedido.' });
+    }
+    console.error('Error consultando chat del pedido:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo consultar el chat.' });
+  }
+});
+
+app.post('/api/orders/:orderId/chat', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) {
+      return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    }
+    const message = normalizeOrderChatMessage(req.body?.message);
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const messageRef = firestore.collection('order_chats').doc(orderId).collection('messages').doc();
+    let participant;
+    await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      participant = await resolveOrderChatParticipant({ user, order, firestore, courierDocumentId });
+      if (!participant.canSend) throw new Error('CHAT_READ_ONLY');
+      if (isOrderChatClosed(order)) throw new Error('CHAT_CLOSED');
+      transaction.create(messageRef, {
+        senderUid: String(user.uid || ''),
+        senderEmail: String(user.email || '').trim().toLowerCase(),
+        senderRole: participant.role,
+        senderName: participant.name,
+        text: message,
+        createdAt: FieldValue.serverTimestamp()
+      });
+    });
+    return res.status(201).json({
+      success: true,
+      message: {
+        id: messageRef.id,
+        senderRole: participant.role,
+        senderName: participant.name,
+        text: message,
+        createdAt: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) {
+      return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    }
+    if (error.message === 'CHAT_FORBIDDEN' || error.message === 'CHAT_READ_ONLY') {
+      return res.status(403).json({ success: false, error: 'No tenés permiso para enviar mensajes en este chat.' });
+    }
+    if (error.message === 'CHAT_MESSAGE_INVALID') {
+      return res.status(400).json({ success: false, error: 'El mensaje debe tener entre 1 y 1000 caracteres.' });
+    }
+    if (error.message === 'CHAT_CLOSED') {
+      return res.status(409).json({ success: false, error: 'El chat de este pedido está cerrado.' });
+    }
+    if (error.message === 'ORDER_NOT_FOUND') {
+      return res.status(404).json({ success: false, error: 'No se encontró el pedido.' });
+    }
+    console.error('Error enviando mensaje del chat:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo enviar el mensaje.' });
   }
 });
 

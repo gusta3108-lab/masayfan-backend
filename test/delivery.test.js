@@ -98,9 +98,10 @@ test('courier order payload exposes only payment method and accepted delivery am
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
   });
   assert.deepEqual(Object.keys(payload).sort(), [
-    'address', 'clientName', 'clientPhone', 'courierId', 'courierName',
+    'address', 'clientName', 'courierId', 'courierName',
     'delivery', 'deliveryLocation', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
   ].sort());
+  assert.equal(Object.hasOwn(payload, 'clientPhone'), false, 'courier payload must not expose customer phone');
   assert.equal(payload.paymentMethod, 'efectivo');
   assert.deepEqual(payload.delivery, {
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
@@ -123,6 +124,7 @@ test('WhatsApp link addresses only the courier and URL-encodes order details', (
   assert.match(message, /María/);
   assert.match(message, /Av\. Siempre Viva 123/);
   assert.match(message, /google\.com\/maps/);
+  assert.doesNotMatch(message, /Teléfono:|112233/);
 });
 
 test('WhatsApp map link omits null coordinates instead of routing to zero coordinates', () => {
@@ -206,12 +208,13 @@ test('route planning preserves selected order when coordinates are incomplete an
 test('batch WhatsApp message contains all assigned stops and route links', () => {
   const { buildBatchCourierWhatsAppUrl } = require('../lib/delivery');
   const url = buildBatchCourierWhatsAppUrl({ whatsapp: '5491112345678' }, [
-    { orderId: 'A1', clientName: 'Ana', address: 'Calle Uno' },
+    { orderId: 'A1', clientName: 'Ana', clientPhone: '5491100011111', address: 'Calle Uno' },
     { orderId: 'B2', clientName: 'Luis', address: 'Calle Dos' }
   ], 'https://www.google.com/maps/dir/?api=1');
   const message = decodeURIComponent(url.split('?text=')[1]);
   assert.match(message, /Pedido A1/);
   assert.match(message, /Pedido B2/);
   assert.match(message, /Abrir ruta completa/);
+  assert.doesNotMatch(message, /Teléfono:|5491100011111/);
 });
 
