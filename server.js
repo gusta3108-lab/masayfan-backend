@@ -765,15 +765,19 @@ app.post('/api/admin/test-order', async (req, res) => {
     const adminUser = await authenticatedAdmin(req);
     const orderRef = firestore.collection('pedidos').doc();
     const createdAt = new Date().toISOString();
+    const testLat = Number((-34.735 + Math.random() * 0.055).toFixed(6));
+    const testLon = Number((-58.445 + Math.random() * 0.075).toFixed(6));
+    const testStreetNumber = 100 + Math.floor(Math.random() * 9000);
+    const testAddress = 'Dirección ficticia ' + testStreetNumber + ', Lanús, Buenos Aires (solo prueba)';
     const testOrder = {
       esPrueba: true,
       testType: 'audio',
       clientName: 'PRUEBA DE AUDIO',
       clientPhone: '—',
-      address: 'Pedido ficticio de administración',
-      deliveryLocation: { lat: -34.695364, lon: -58.384385 },
-      locationLabel: 'Ubicación de referencia del local · solo prueba',
-      notes: 'ESTE PEDIDO ES UNA PRUEBA. No corresponde a una venta ni genera cobros. La ubicación del mapa es una referencia del local, no un domicilio de cliente.',
+      address: testAddress,
+      deliveryLocation: { lat: testLat, lon: testLon },
+      locationLabel: 'Ubicación aleatoria de prueba · no es domicilio real',
+      notes: 'ESTE PEDIDO ES UNA PRUEBA. No corresponde a una venta ni genera cobros. La dirección y el punto GPS son aleatorios dentro de Lanús y solo sirven para probar el minimapa.',
       items: [{ id: 'test-audio', name: 'Prueba de notificación', price: 0, qty: 1, options: '', description: 'Pedido ficticio para comprobar recepción y audio.' }],
       total: 0,
       uid: adminUser.uid,
