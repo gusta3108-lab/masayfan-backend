@@ -51,6 +51,7 @@ test('courier order view includes the accepted fee and cash handoff state', () =
     status: 'assigned',
     routeOrder: 1
   });
+  assert.equal(Object.hasOwn(result, 'clientPhone'), false, 'courier payload must never expose customer phone');
   assert.equal(result.paymentMethod, 'efectivo');
   assert.equal(result.delivery.courierFee, 4000);
   assert.equal(result.delivery.storeAmount, 16000);
@@ -140,7 +141,7 @@ test('courier order payload exposes only payment method and accepted delivery am
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
   });
   assert.deepEqual(Object.keys(payload).sort(), [
-    'address', 'clientName', 'clientPhone', 'courierId', 'courierName',
+    'address', 'clientName', 'courierId', 'courierName',
     'delivery', 'deliveryLocation', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
   ].sort());
   assert.equal(payload.paymentMethod, 'efectivo');
@@ -165,6 +166,7 @@ test('WhatsApp link addresses only the courier and URL-encodes order details', (
   assert.match(message, /María/);
   assert.match(message, /Av\. Siempre Viva 123/);
   assert.match(message, /google\.com\/maps/);
+  assert.doesNotMatch(message, /Teléfono:|112233/);
 });
 
 test('WhatsApp map link omits null coordinates instead of routing to zero coordinates', () => {
@@ -255,5 +257,6 @@ test('batch WhatsApp message contains all assigned stops and route links', () =>
   assert.match(message, /Pedido A1/);
   assert.match(message, /Pedido B2/);
   assert.match(message, /Abrir ruta completa/);
+  assert.doesNotMatch(message, /Teléfono:/);
 });
 
