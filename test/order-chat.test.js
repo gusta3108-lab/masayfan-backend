@@ -22,6 +22,7 @@ function fakeFirestore({ admins = [], couriers = {} } = {}) {
               ? (couriers[id] || null)
               : null;
           return {
+            collectionName: name,
             get: async () => ({
               exists: value !== null,
               data: () => value || {}
@@ -97,6 +98,31 @@ test('administrators can supervise chat but cannot send messages', async () => {
     courierDocumentId
   });
   assert.deepEqual(participant, { role: 'admin', name: 'Administración', canSend: false });
+});
+
+
+test('message authorization reads admin and courier membership inside the sending transaction', async () => {
+  const email = 'courier@example.com';
+  const id = courierDocumentId(email);
+  const firestore = fakeFirestore({
+    couriers: { [id]: { email, name: 'Repartidor', active: true } }
+  });
+  const transactionReads = [];
+  const transaction = {
+    get: async ref => {
+      transactionReads.push(ref.collectionName);
+      return ref.get();
+    }
+  };
+  const participant = await resolveOrderChatParticipant({
+    user: { email },
+    order: { delivery: { courierId: id } },
+    firestore,
+    courierDocumentId,
+    transaction
+  });
+  assert.equal(participant.role, 'courier');
+  assert.deepEqual(transactionReads, ['administradores', 'repartidores']);
 });
 
 test('order chat closes when delivery is unassigned, completed, rejected or cancelled', () => {
