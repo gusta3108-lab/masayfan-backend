@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  buildCourierOffer, acceptCourierOffer, buildCourierEarning, summarizeCourierWallet
+  buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet
 } = require('../lib/courier-wallet');
 
 const courierId = 'a'.repeat(64);
@@ -69,4 +69,26 @@ test('cash compensation accumulates across multiple orders', () => {
 
 test('offer cannot be accepted after it is no longer pending', () => {
   assert.throws(() => acceptCourierOffer({ total: 20000 }, { courierId, amount: 4000, status: 'rejected' }), /OFFER_NOT_AVAILABLE/);
+});
+
+test('cash settlement can only be confirmed after a courier delivered and collected the customer payment', () => {
+  const deliveredCashOrder = {
+    status: 'finalizado',
+    paymentMethod: 'efectivo',
+    paymentStatus: 'cash_received',
+    delivery: { courierId, offerAccepted: true, status: 'delivered' }
+  };
+  assert.equal(canConfirmCourierCashSettlement(deliveredCashOrder), true);
+  assert.equal(canConfirmCourierCashSettlement({
+    ...deliveredCashOrder, delivery: { ...deliveredCashOrder.delivery, status: 'assigned' }
+  }), false);
+  assert.equal(canConfirmCourierCashSettlement({
+    ...deliveredCashOrder, paymentStatus: 'pending'
+  }), false);
+  assert.equal(canConfirmCourierCashSettlement({
+    ...deliveredCashOrder, paymentMethod: 'mercadopago'
+  }), false);
+  assert.equal(canConfirmCourierCashSettlement({
+    ...deliveredCashOrder, delivery: { ...deliveredCashOrder.delivery, offerAccepted: false }
+  }), false);
 });
