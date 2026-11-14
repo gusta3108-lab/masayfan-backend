@@ -997,6 +997,7 @@ app.post('/api/admin/couriers', async (req, res) => {
       || error.message === 'COURIER_PHONE_INVALID' || error.message === 'COURIER_WHATSAPP_INVALID') {
       return res.status(400).json({ success: false, error: 'Revisá nombre, correo, teléfono y WhatsApp internacional del repartidor.' });
     }
+    if (error.message === 'COURIER_HAS_ACTIVE_DELIVERIES') return res.status(409).json({ success: false, code: 'COURIER_HAS_ACTIVE_DELIVERIES', error: 'No se puede desactivar este repartidor mientras tenga entregas asignadas o en camino. Reasigná o completá esos pedidos primero.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para administrar repartidores.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error guardando repartidor:', error.message);
