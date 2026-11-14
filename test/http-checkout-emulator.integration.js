@@ -85,6 +85,8 @@ let baseUrl;
 let idToken;
 let userUid;
 let customerEmail = null;
+let adminEmail = null;
+let adminIdToken = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const noStockProductId = 'http-no-stock-' + randomUUID();
@@ -117,6 +119,32 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   const authData = await signup.json();
   idToken = authData.idToken;
   userUid = authData.localId;
+
+  // La ruta administrativa requiere un token Firebase cuyo email_verified sea true.
+  // Se crea una identidad de administrador separada y se verifica exclusivamente en Auth Emulator.
+  adminEmail = 'admin-' + randomUUID() + '@example.test';
+  const adminSignup = await fetch(
+    'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
+      '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: adminEmail, password: 'EmulatorPass123!', returnSecureToken: true })
+    }
+  );
+  assert.equal(adminSignup.status, 200, 'Auth Emulator debe crear el administrador de prueba');
+  const adminSignupData = await adminSignup.json();
+  const verifyAdmin = await fetch(
+    'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
+      '/identitytoolkit.googleapis.com/v1/accounts:update?key=emulator-api-key',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idToken: adminSignupData.idToken, emailVerified: true, returnSecureToken: true })
+    }
+  );
+  assert.equal(verifyAdmin.status, 200, 'Auth Emulator debe marcar el administrador como verificado');
+  adminIdToken = (await verifyAdmin.json()).idToken;
 
   await firestore.collection('productos').doc(productId).set({
     name: 'Producto HTTP de prueba',
@@ -509,10 +537,10 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       inventoryCommitted: true,
       inventoryRestored: false
     });
-    await firestore.collection('administradores').doc(customerEmail).set({ enabled: true });
+    await firestore.collection('administradores').doc(adminEmail).set({ enabled: true });
 
     const endpoint = baseUrl + '/api/admin/orders/' + refundOrderId + '/status';
-    const adminHeaders = { ...headers, 'content-type': 'application/json' };
+    const adminHeaders = { ...headers, authorization: 'Bearer ' + adminIdToken, 'content-type': 'application/json' };
     const beforeRefund = await fetch(endpoint, {
       method: 'POST',
       headers: adminHeaders,
