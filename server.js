@@ -20,7 +20,7 @@ const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
 const { searchPaymentsByExternalReference } = require('./lib/mercadopago-payment-search');
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl } = require('./lib/delivery');
-const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, summarizeCourierWallet } = require('./lib/courier-wallet');
+const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet } = require('./lib/courier-wallet');
 
 const app = express();
 app.use(cors({
@@ -54,9 +54,12 @@ try {
     firestore = getFirestore(firebaseApp);
     firebaseAuth = getAuth(firebaseApp);
     firebaseMessaging = getMessaging(firebaseApp);
+    console.info('Firebase Admin inicializado correctamente para el proyecto masayfantasias.');
+  } else {
+    console.error('Firebase Admin no inicializado: falta la variable FIREBASE_SERVICE_ACCOUNT_JSON en el entorno del servidor.');
   }
 } catch (error) {
-  console.error('No se pudo inicializar Firebase Admin. Revisá FIREBASE_SERVICE_ACCOUNT_JSON.');
+  console.error('No se pudo inicializar Firebase Admin:', error.name || 'Error', error.message || 'sin detalle');
 }
 
 function requireFirebaseServices(res) {
@@ -765,13 +768,31 @@ app.post('/api/admin/test-order', async (req, res) => {
     const adminUser = await authenticatedAdmin(req);
     const orderRef = firestore.collection('pedidos').doc();
     const createdAt = new Date().toISOString();
+    const testLat = Number((-34.735 + Math.random() * 0.055).toFixed(6));
+    const testLon = Number((-58.445 + Math.random() * 0.075).toFixed(6));
+    const testStreetNumber = 100 + Math.floor(Math.random() * 9000);
+    const testAddress = 'Dirección ficticia ' + testStreetNumber + ', Lanús, Buenos Aires (solo prueba)';
     const testOrder = {
       esPrueba: true,
       testType: 'audio',
       clientName: 'PRUEBA DE AUDIO',
       clientPhone: '—',
-      address: 'Pedido ficticio de administración',
-      notes: 'ESTE PEDIDO ES UNA PRUEBA. No corresponde a una venta ni genera cobros.',
+      address: testAddress,
+      // Guardar el punto en el formato canónico y en alias compatibles con
+      // clientes antiguos/serializadores que esperan otros nombres de campo.
+      deliveryLocation: { lat: testLat, lon: testLon },
+      location: { lat: testLat, lon: testLon },
+      coordinates: { latitude: testLat, longitude: testLon },
+      // La vista admin y el serializador de entregas pueden leer el punto desde delivery.
+      delivery: {
+        status: 'not_assigned',
+        location: { lat: testLat, lon: testLon },
+        deliveryLocation: { lat: testLat, lon: testLon }
+      },
+      latitude: testLat,
+      longitude: testLon,
+      locationLabel: 'Ubicación aleatoria de prueba · no es domicilio real',
+      notes: 'ESTE PEDIDO ES UNA PRUEBA. No corresponde a una venta ni genera cobros. La dirección y el punto GPS son aleatorios dentro de Lanús y solo sirven para probar el minimapa.',
       items: [{ id: 'test-audio', name: 'Prueba de notificación', price: 0, qty: 1, options: '', description: 'Pedido ficticio para comprobar recepción y audio.' }],
       total: 0,
       uid: adminUser.uid,
@@ -784,7 +805,14 @@ app.post('/api/admin/test-order', async (req, res) => {
     // El pedido ficticio también debe probar el envío push a los dispositivos admin.
     // La alerta es asíncrona y no convierte esta prueba en una venta ni en un cobro.
     notifyAdminsNewOrder(orderRef.id, testOrder);
-    return res.status(201).json({ success: true, order_id: orderRef.id, esPrueba: true });
+    return res.status(201).json({
+      success: true,
+      order_id: orderRef.id,
+      esPrueba: true,
+      address: testAddress,
+      deliveryLocation: { lat: testLat, lon: testLon },
+      locationLabel: testOrder.locationLabel
+    });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
     const adminError = error.message === 'ADMIN_REQUIRED';
@@ -1255,15 +1283,19 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
         throw new Error('ORDER_NOT_DELIVERABLE');
       }
       if (delivery.status === nextStatus) return;
-      if (nextStatus === 'en_camino'
-        && ['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())
-        && delivery.storeCashStatus !== 'received') throw new Error('CASH_HANDOFF_REQUIRED');
       const update = {
         'delivery.status': nextStatus,
         ...(nextStatus === 'en_camino' ? { 'delivery.pickedUpAt': FieldValue.serverTimestamp() } : {
           'delivery.deliveredAt': FieldValue.serverTimestamp(),
           status: 'finalizado',
-          completedAt: new Date().toISOString()
+          completedAt: new Date().toISOString(),
+          ...(['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())
+            ? {
+                paymentStatus: 'cash_received',
+                paymentReceivedAt: FieldValue.serverTimestamp(),
+                paymentReceivedBy: String(user.email).toLowerCase()
+              }
+            : {})
         })
       };
       if (nextStatus === 'delivered' && delivery.offerAccepted === true) {
@@ -1285,7 +1317,6 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
     return res.json({ success: true, orderId, deliveryStatus: nextStatus });
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
-    if (error.message === 'CASH_HANDOFF_REQUIRED') return res.status(409).json({ success: false, error: 'Antes de salir, administración debe confirmar que recibió el importe de Masay correspondiente a este pedido.' });
     if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
     if (error.message === 'INVALID_DELIVERY_TRANSITION') return res.status(409).json({ success: false, error: 'Primero marcá el pedido en camino y luego como entregado.' });
     if (error.message === 'ORDER_NOT_DELIVERABLE') return res.status(409).json({ success: false, error: 'Este pedido ya no está disponible para reparto. Consultá con administración.' });
@@ -1830,7 +1861,7 @@ app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
       const order = snap.data();
       const delivery = order.delivery || {};
       if (!['efectivo', 'cash'].includes(String(order.paymentMethod || 'efectivo').toLowerCase())) throw new Error('CASH_ONLY');
-      if (delivery.offerAccepted !== true || !delivery.courierId || delivery.status !== 'assigned') throw new Error('DELIVERY_NOT_ASSIGNED');
+      if (!canConfirmCourierCashSettlement(order)) throw new Error('DELIVERY_NOT_COMPLETED');
       if (delivery.storeCashStatus === 'received') return { alreadyReceived: true, amount: delivery.storeAmount };
       const amount = Number(delivery.storeAmount);
       if (!Number.isFinite(amount) || amount < 0) throw new Error('STORE_AMOUNT_INVALID');
@@ -1846,7 +1877,7 @@ app.post('/api/admin/orders/:orderId/cash-handoff', async (req, res) => {
   } catch (error) {
     if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
     if (error.message === 'CASH_ONLY') return res.status(409).json({ success: false, error: 'Este procedimiento solo aplica a pedidos en efectivo.' });
-    if (error.message === 'DELIVERY_NOT_ASSIGNED') return res.status(409).json({ success: false, error: 'El pedido debe tener una oferta aceptada y estar asignado.' });
+    if (error.message === 'DELIVERY_NOT_COMPLETED') return res.status(409).json({ success: false, error: 'El pedido debe estar entregado y el efectivo del cliente confirmado antes de registrar la rendición a Masay.' });
     if (error.message === 'STORE_AMOUNT_INVALID') return res.status(409).json({ success: false, error: 'El importe que corresponde a Masay es inválido.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para confirmar cobros.' });
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
