@@ -151,7 +151,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   });
 
   const headers = {
-    authorization: 'Bearer ' + adminIdToken,
+    authorization: 'Bearer ' + idToken,
     'content-type': 'application/json'
   };
   const order = {
