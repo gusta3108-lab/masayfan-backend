@@ -1244,13 +1244,20 @@ app.get('/api/orders/:orderId/chat', async (req, res) => {
     if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) {
       return res.status(400).json({ success: false, error: 'Pedido inválido.' });
     }
-    const orderSnap = await firestore.collection('pedidos').doc(orderId).get();
-    if (!orderSnap.exists) return res.status(404).json({ success: false, error: 'No se encontró el pedido.' });
-    const order = orderSnap.data();
-    const participant = await resolveOrderChatParticipant({ user, order, firestore, courierDocumentId });
-    const closed = isOrderChatClosed(order);
-    const snapshot = await firestore.collection('order_chats').doc(orderId).collection('messages')
-      .orderBy('createdAt', 'desc').limit(100).get();
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    const messagesQuery = firestore.collection('order_chats').doc(orderId).collection('messages')
+      .orderBy('createdAt', 'desc').limit(100);
+    const chatState = await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      const participant = await resolveOrderChatParticipant({
+        user, order, firestore, courierDocumentId, transaction
+      });
+      const snapshot = await transaction.get(messagesQuery);
+      return { participant, closed: isOrderChatClosed(order), snapshot };
+    });
+    const { participant, closed, snapshot } = chatState;
     const messages = snapshot.docs.map(doc => {
       const value = doc.data();
       return {
@@ -1274,6 +1281,9 @@ app.get('/api/orders/:orderId/chat', async (req, res) => {
     }
     if (error.message === 'CHAT_FORBIDDEN') {
       return res.status(403).json({ success: false, error: 'No tenés acceso al chat de este pedido.' });
+    }
+    if (error.message === 'ORDER_NOT_FOUND') {
+      return res.status(404).json({ success: false, error: 'No se encontró el pedido.' });
     }
     console.error('Error consultando chat del pedido:', error.message);
     return res.status(500).json({ success: false, error: 'No se pudo consultar el chat.' });
