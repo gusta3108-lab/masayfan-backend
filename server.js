@@ -15,6 +15,7 @@ const {
   InvalidWebhookSignatureError
 } = require('mercadopago');
 
+const { buildMercadoPagoPaymentMethods } = require('./lib/mercadopago-payment-methods');
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
@@ -22,6 +23,8 @@ const { saveCourierProfileSafely, markCourierAssignment } = require('./lib/couri
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
+const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
+const { summarizeAccounting } = require('./lib/accounting-summary');
 
 const app = express();
 app.use(cors({
@@ -137,9 +140,10 @@ async function priceCartItems(items) {
       const bannerSnap = await firestore.collection('banners').doc(String(item.bannerId)).get();
       if (!bannerSnap.exists) throw new Error('La promoción ya no está disponible.');
       const banner = bannerSnap.data();
+      if (banner.activo === false) throw new Error('La promoción ya no está disponible.');
       if (!banner.productId) throw new Error('La promoción no tiene un producto asociado.');
       const promoProductSnap = await firestore.collection('productos').doc(String(banner.productId)).get();
-      if (!promoProductSnap.exists || promoProductSnap.data().activo === false) {
+      if (!promoProductSnap.exists || promoProductSnap.data().activo === false || promoProductSnap.data().archived === true) {
         throw new Error('El producto de esta promoción ya no está disponible.');
       }
       unitPrice = money(banner.promoPrice);
@@ -151,7 +155,7 @@ async function priceCartItems(items) {
       const productSnap = await firestore.collection('productos').doc(itemId).get();
       if (!productSnap.exists) throw new Error('Uno de los productos ya no existe.');
       const product = productSnap.data();
-      if (product.activo === false) throw new Error('Uno de los productos no está disponible.');
+      if (product.activo === false || product.archived === true) throw new Error('Uno de los productos no está disponible.');
       const basePrice = money(product.price ?? product.precio ?? 0);
       const discount = Number(product.discount || 0);
       if (!Number.isFinite(discount) || discount < 0 || discount > 100) {
@@ -238,6 +242,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         externalReference: reference,
         paymentId: String(paymentId),
         paymentStatus: 'approved',
+        receivedInstallments: Number.isInteger(Number(payment.installments)) ? Number(payment.installments) : null,
         total: data?.total ?? null,
         currency: String(payment.currency_id || ''),
         receivedAmount: money(payment.transaction_amount || 0),
@@ -292,7 +297,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   }
 
   let validationFailure = null;
-  if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
+  if (hasInstallmentPolicyViolation(payment)) {
+    validationFailure = 'Mercado Pago informó un pago en más de una cuota; requiere revisión administrativa.';
+  } else if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
     validationFailure = 'El importe o la moneda del pago no coincide con el pedido.';
   } else if (!pending.preferenceId || (payment.preference_id && String(payment.preference_id) !== String(pending.preferenceId))) {
     // Mercado Pago puede omitir preference_id en el recurso Payment.
@@ -328,6 +335,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         paymentMethod: 'mercadopago',
         paymentId: String(paymentId),
         paymentStatus: 'approved',
+        mercadoPagoAccounting: buildMercadoPagoAccounting(payment),
         createdAt: new Date().toISOString()
       });
       transaction.delete(pendingRef);
@@ -337,6 +345,33 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
     return { verified: true, alreadyRegistered: false };
 }
+
+app.get('/api/admin/accounting-summary', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const [ordersSnapshot, fundSnapshot] = await Promise.all([
+      firestore.collection('pedidos').get(),
+      firestore.collection('fondo_asistencia_movimientos').get()
+    ]);
+    const summary = summarizeAccounting({
+      orders: ordersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      fundMovements: fundSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    });
+    return res.json({ success: true, summary });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
+      || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error consultando resumen contable:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para consultar contabilidad.'
+        : 'No se pudo consultar el resumen contable.'
+    });
+  }
+});
 
 app.get('/api/admin/payment-incidents', async (req, res) => {
   try {
@@ -1602,6 +1637,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
             pending: 'https://masayfantasias.com/?mp_return=1'
           },
           notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
+          // Tarjetas habilitadas; máximo de una cuota impuesto por el servidor.
+          payment_methods: buildMercadoPagoPaymentMethods(),
           auto_return: 'approved'
         }
       });

@@ -7,17 +7,39 @@ const { randomUUID } = require('node:crypto');
 const projectId = 'masayfantasias';
 const firestoreBase = `http://127.0.0.1:8080/v1/projects/${projectId}/databases/(default)/documents`;
 const authBase = 'http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key';
+const { initializeApp, getApps } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+const adminApp = getApps().find(app => app.name === '[DEFAULT]') || initializeApp({ projectId });
+const emulatorAuth = getAuth(adminApp);
 
-async function createUser() {
+async function createUser({ verified = false } = {}) {
   const email = `rules-${randomUUID()}@example.test`;
+  const password = 'EmulatorPass123!';
   const response = await fetch(authBase, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, password: 'EmulatorPass123!', returnSecureToken: true })
+    body: JSON.stringify({ email, password, returnSecureToken: true })
   });
   const responseText = await response.text();
   assert.equal(response.status, 200, responseText);
-  return JSON.parse(responseText);
+  const user = JSON.parse(responseText);
+  if (!verified) return user;
+
+  await emulatorAuth.updateUser(user.localId, { emailVerified: true });
+  const updatedUser = await emulatorAuth.getUser(user.localId);
+  assert.equal(updatedUser.emailVerified, true, 'Auth Emulator debe guardar el correo verificado');
+
+  const signIn = await fetch('http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-api-key', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password, returnSecureToken: true })
+  });
+  const signInText = await signIn.text();
+  assert.equal(signIn.status, 200, signInText);
+  const signedInUser = JSON.parse(signInText);
+  const decoded = await emulatorAuth.verifyIdToken(signedInUser.idToken);
+  assert.equal(decoded.email_verified, true, 'El token nuevo debe incluir email_verified=true');
+  return signedInUser;
 }
 
 async function seed(path, fields) {
@@ -120,23 +142,63 @@ test('Firestore security rules enforce public, owner, and server-only access', a
 });
 
 test('Firestore rules authorize the admin console without exposing admin data to customers', async t => {
-  const admin = await createUser();
+  const admin = await createUser({ verified: true });
+  const unverifiedAdmin = await createUser();
   const customer = await createUser();
   const productId = `admin-rules-product-${randomUUID()}`;
+  const managedProductId = `admin-rules-managed-product-${randomUUID()}`;
+  const flagOnlyProductId = `admin-rules-flag-only-product-${randomUUID()}`;
   const costId = `admin-rules-cost-${randomUUID()}`;
 
   await seed(`administradores/${admin.email}`, {
+    role: { stringValue: 'admin' }
+  });
+  await seed(`administradores/${unverifiedAdmin.email}`, {
     role: { stringValue: 'admin' }
   });
   await seed(`productos/${productId}`, {
     name: { stringValue: 'Producto administrable' },
     activo: { booleanValue: true }
   });
+  await seed(`productos/${managedProductId}`, {
+    name: { stringValue: 'Producto con inventario existente' },
+    activo: { booleanValue: true },
+    stockManaged: { booleanValue: true },
+    stockQuantity: { integerValue: '8' },
+    stockReserved: { integerValue: '2' }
+  });
+  await seed(`productos/${flagOnlyProductId}`, {
+    name: { stringValue: 'Producto con marca de inventario' },
+    activo: { booleanValue: true },
+    stockManaged: { booleanValue: true }
+  });
   await seed(`costos_productos/${costId}`, {
     costo: { integerValue: '250' }
   });
   await seed('config/local', {
     abierto: { booleanValue: true }
+  });
+
+  await t.test('una cuenta administradora sin correo verificado no obtiene permisos directos de Firestore', async () => {
+    const productUpdate = await request(`productos/${productId}`, {
+      token: unverifiedAdmin.idToken,
+      method: 'PATCH',
+      body: { fields: { name: { stringValue: 'Cambio no autorizado' } } }
+    });
+    assert.equal(productUpdate.status, 403);
+
+    const costRead = await request(`costos_productos/${costId}`, { token: unverifiedAdmin.idToken });
+    assert.equal(costRead.status, 403);
+
+    const ordersRead = await request('pedidos', { token: unverifiedAdmin.idToken });
+    assert.equal(ordersRead.status, 403);
+
+    const localWrite = await request('config/local', {
+      token: unverifiedAdmin.idToken,
+      method: 'PATCH',
+      body: { fields: { abierto: { booleanValue: false } } }
+    });
+    assert.equal(localWrite.status, 403);
   });
 
   await t.test('el administrador puede consultar su propio documento de rol', async () => {
@@ -175,6 +237,77 @@ test('Firestore rules authorize the admin console without exposing admin data to
       } }
     });
     assert.equal(response.status, 200, await response.text());
+  });
+
+  await t.test('el administrador no puede crear productos con inventario administrado mientras está bloqueado', async () => {
+    const response = await request('productos', {
+      token: admin.idToken,
+      method: 'POST',
+      body: { fields: {
+        name: { stringValue: 'Producto con inventario no autorizado' },
+        activo: { booleanValue: true },
+        stockManaged: { booleanValue: true },
+        stockQuantity: { integerValue: '5' },
+        stockReserved: { integerValue: '0' }
+      } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el administrador no puede crear productos con reservas de inventario aunque falte stockQuantity', async () => {
+    const response = await request('productos', {
+      token: admin.idToken,
+      method: 'POST',
+      body: { fields: {
+        name: { stringValue: 'Producto con reserva no autorizada' },
+        activo: { booleanValue: true },
+        stockReserved: { integerValue: '1' }
+      } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el administrador no puede activar inventario por stockManaged en un producto existente', async () => {
+    const response = await request(`productos/${productId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: {
+        stockManaged: { booleanValue: true },
+        stockQuantity: { integerValue: '5' },
+        stockReserved: { integerValue: '0' }
+      } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el administrador no puede activar inventario agregando solo stockQuantity', async () => {
+    const response = await request(`productos/${productId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: { stockQuantity: { integerValue: '5' } } }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test('el inventario existente puede actualizarse sin perder reservas', async () => {
+    const response = await request(`productos/${managedProductId}`, {
+      token: admin.idToken,
+      method: 'PATCH',
+      body: { fields: {
+        stockManaged: { booleanValue: true },
+        stockQuantity: { integerValue: '10' },
+        stockReserved: { integerValue: '2' }
+      } }
+    });
+    assert.equal(response.status, 200, await response.text());
+  });
+
+  await t.test('no se puede eliminar un producto marcado como inventario administrado aunque falte stockQuantity', async () => {
+    const response = await request(`productos/${flagOnlyProductId}`, {
+      token: admin.idToken,
+      method: 'DELETE'
+    });
+    assert.equal(response.status, 403);
   });
 
   await t.test('un cliente no puede modificar el catálogo ni sus costos', async () => {
