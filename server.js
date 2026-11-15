@@ -355,7 +355,7 @@ app.post('/api/admin/orders/backfill-display-numbers', async (req, res) => {
       .filter(value => /^\\d+$/.test(value))
       .map(Number)
       .filter(Number.isSafeInteger);
-    const highestExisting = numericValues.length ? Math.max(...numericValues) : 0;
+    const highestExisting = numericValues.reduce((maximum, value) => Math.max(maximum, value), 0);
     const counterRef = firestore.collection('secuencias').doc('pedidos');
     await firestore.runTransaction(async transaction => {
       const counterSnap = await transaction.get(counterRef);
