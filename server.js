@@ -1602,6 +1602,11 @@ app.post('/api/crear-preferencia', async (req, res) => {
             pending: 'https://masayfantasias.com/?mp_return=1'
           },
           notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
+          // Mantener tarjetas habilitadas, pero impedir cualquier financiación en cuotas.
+          payment_methods: {
+            installments: 1,
+            default_installments: 1
+          },
           auto_return: 'approved'
         }
       });
