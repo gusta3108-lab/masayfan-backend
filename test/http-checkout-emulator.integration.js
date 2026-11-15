@@ -605,6 +605,55 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
+  await t.test('el backfill asigna correlativos a pedidos históricos sin tocar pedidos de prueba', async () => {
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const counterRef = firestore.collection('secuencias').doc('pedidos');
+    const base = Date.now();
+    const legacyIds = [randomUUID(), randomUUID()];
+    const testId = randomUUID();
+    await adminRef.set({ enabled: true });
+    await firestore.collection('pedidos').doc(legacyIds[0]).set({
+      clientName: 'Pedido histórico A',
+      paymentMethod: 'efectivo',
+      createdAt: Timestamp.fromMillis(base - 2000)
+    });
+    await firestore.collection('pedidos').doc(legacyIds[1]).set({
+      clientName: 'Pedido histórico B',
+      paymentMethod: 'efectivo',
+      createdAt: Timestamp.fromMillis(base - 1000)
+    });
+    await firestore.collection('pedidos').doc(testId).set({
+      clientName: 'Pedido de prueba',
+      esPrueba: true,
+      paymentMethod: 'efectivo',
+      createdAt: Timestamp.fromMillis(base - 3000)
+    });
+    try {
+      const response = await fetch(baseUrl + '/api/admin/orders/backfill-display-numbers', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + idToken }
+      });
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.equal(body.success, true);
+      assert.ok(body.assigned >= 2, JSON.stringify(body));
+      const first = (await firestore.collection('pedidos').doc(legacyIds[0]).get()).data();
+      const second = (await firestore.collection('pedidos').doc(legacyIds[1]).get()).data();
+      const testOrder = (await firestore.collection('pedidos').doc(testId).get()).data();
+      assert.match(first.displayOrderNumber, /^\d{4,}$/);
+      assert.match(second.displayOrderNumber, /^\d{4,}$/);
+      assert.ok(Number(first.displayOrderNumber) < Number(second.displayOrderNumber));
+      assert.equal(testOrder.displayOrderNumber, undefined);
+    } finally {
+      await Promise.all([
+        firestore.collection('pedidos').doc(legacyIds[0]).delete(),
+        firestore.collection('pedidos').doc(legacyIds[1]).delete(),
+        firestore.collection('pedidos').doc(testId).delete(),
+        adminRef.delete()
+      ]);
+    }
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
