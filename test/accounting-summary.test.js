@@ -31,6 +31,8 @@ test('summary separates cash, online, pending and gross sales; excludes test ord
   assert.equal(result.sales.totalCollectedMonth, 190000);
   assert.equal(result.sales.pendingCollectionMonth, 75000);
   assert.equal(result.sales.ordersToday, 2);
+  assert.equal(result.sales.deliveredOrdersMonth, 2);
+  assert.equal(result.sales.deliveredOrdersToday, 1);
 });
 
 test('cash collection is counted on the date it was actually received', () => {
