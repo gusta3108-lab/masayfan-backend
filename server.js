@@ -343,6 +343,75 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     return { verified: true, alreadyRegistered: false };
 }
 
+// Backfill seguro de numeracion visible para pedidos historicos.
+app.post('/api/admin/orders/backfill-display-numbers', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const snapshot = await firestore.collection('pedidos').get();
+    const orders = snapshot.docs.map(doc => ({ ref: doc.ref, id: doc.id, data: doc.data() }));
+    const numericValues = orders
+      .map(item => String(item.data.displayOrderNumber || '').trim())
+      .filter(value => /^\\d+$/.test(value))
+      .map(Number)
+      .filter(Number.isSafeInteger);
+    const highestExisting = numericValues.length ? Math.max(...numericValues) : 0;
+    const counterRef = firestore.collection('secuencias').doc('pedidos');
+    await firestore.runTransaction(async transaction => {
+      const counterSnap = await transaction.get(counterRef);
+      const current = counterSnap.exists ? Number(counterSnap.data().lastNumber || 0) : 0;
+      if (!Number.isSafeInteger(current) || current < 0) throw new Error('ORDER_NUMBER_SEQUENCE_INVALID');
+      if (current < highestExisting) {
+        transaction.set(counterRef, { lastNumber: highestExisting, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      }
+    });
+    const createdAtMillis = value => {
+      if (value && typeof value.toMillis === 'function') return value.toMillis();
+      if (value && typeof value === 'object' && Number.isFinite(value.seconds)) return value.seconds * 1000;
+      const parsed = value ? new Date(value).getTime() : 0;
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const pending = orders
+      .filter(item => !String(item.data.displayOrderNumber || '').trim() && !isTestOrder(item.data))
+      .sort((a, b) => createdAtMillis(a.data.createdAt) - createdAtMillis(b.data.createdAt) || a.id.localeCompare(b.id))
+      .slice(0, 100);
+    let assigned = 0;
+    for (const item of pending) {
+      await firestore.runTransaction(async transaction => {
+        const [orderSnap, counterSnap] = await Promise.all([
+          transaction.get(item.ref),
+          transaction.get(counterRef)
+        ]);
+        if (!orderSnap.exists || String(orderSnap.data().displayOrderNumber || '').trim() || isTestOrder(orderSnap.data())) return;
+        const lastNumber = counterSnap.exists ? Number(counterSnap.data().lastNumber || 0) : 0;
+        if (!Number.isSafeInteger(lastNumber) || lastNumber < 0 || lastNumber >= Number.MAX_SAFE_INTEGER) {
+          throw new Error('ORDER_NUMBER_SEQUENCE_INVALID');
+        }
+        const nextNumber = lastNumber + 1;
+        transaction.set(counterRef, { lastNumber: nextNumber, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+        transaction.update(item.ref, { displayOrderNumber: String(nextNumber).padStart(4, '0') });
+        assigned++;
+      });
+    }
+    const remaining = Math.max(0, orders.filter(item =>
+      !String(item.data.displayOrderNumber || '').trim() && !isTestOrder(item.data)
+    ).length - assigned);
+    return res.json({ success: true, assigned, remaining, message: assigned
+      ? 'Se asignaron números correlativos a pedidos históricos.'
+      : 'No hay pedidos históricos pendientes de numeración.' });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message) || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error numerando pedidos históricos:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para numerar pedidos.'
+        : 'No se pudieron numerar los pedidos históricos.'
+    });
+  }
+});
+
 app.get('/api/admin/payment-incidents', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
