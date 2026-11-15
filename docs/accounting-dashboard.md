@@ -26,6 +26,8 @@ La aplicación debe permitir registrar un depósito/transferencia a la cuenta se
 1. saldo contable inicial + aportes efectivamente depositados - asistencias pagadas;
 2. saldo real informado por el banco.
 
+Los aportes `accrued` se suman al saldo contable del fondo, pero no al saldo de banco. Solo los movimientos `bank_deposit` con estado `posted` aumentan el saldo según depósitos. El panel calcula aportes pendientes de depositar como aportes acumulados menos depósitos registrados, y muestra por separado saldo contable y saldo según depósitos. Ninguno de esos importes se presenta como saldo bancario verificado.
+
 No se debe tratar un aporte devengado en el libro como dinero ya depositado. La conciliación bancaria se mantiene pendiente hasta que el usuario registre/valide el movimiento real.
 
 ## Seguridad y activación
