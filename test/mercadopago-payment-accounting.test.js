@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildMercadoPagoAccounting } = require('../lib/mercadopago-payment-accounting');
+const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('../lib/mercadopago-payment-accounting');
 
 test('normalizes actual Mercado Pago fees, net amount and installment metadata', () => {
   const result = buildMercadoPagoAccounting({
@@ -45,4 +45,11 @@ test('invalid fee rows are ignored and invalid values are not fabricated', () =>
   assert.equal(result.feeTotal, null);
   assert.equal(result.netReceivedAmount, null);
   assert.equal(result.feeDetails.length, 0);
+});
+
+test('detects approved payments that violate the one-installment policy', () => {
+  assert.equal(hasInstallmentPolicyViolation({ installments: 2 }), true);
+  assert.equal(hasInstallmentPolicyViolation({ installments: '3' }), true);
+  assert.equal(hasInstallmentPolicyViolation({ installments: 1 }), false);
+  assert.equal(hasInstallmentPolicyViolation({}), false);
 });
