@@ -116,7 +116,11 @@ test('Firestore security rules enforce public, owner, and server-only access', a
       method: 'PATCH',
       body: { fields: {
         correo: { stringValue: owner.email },
-        createdAt: { stringValue: new Date().toISOString() }
+        createdAt: { timestampValue: new Date().toISOString() },
+        termsAccepted: { booleanValue: true },
+        termsVersion: { stringValue: '1.0' },
+        termsAcceptedAt: { timestampValue: new Date().toISOString() },
+        privacyVersion: { stringValue: '1.0' }
       } }
     });
     assert.equal(response.status, 200, await response.text());
