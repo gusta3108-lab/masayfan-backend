@@ -3,9 +3,14 @@
 ## Panel de contabilidad
 El panel debe mostrar tarjetas separadas:
 - Ventas brutas del día y del mes (pedidos no marcados como prueba).
-- Importes cobrados/confirmados del día y del mes, separados de ventas pendientes.
+- Cobrado en efectivo del día y del mes.
+- Cobrado online del día y del mes (Mercado Pago).
+- Total cobrado (efectivo + online), sin duplicar pedidos.
+- Pendiente de cobro, separado de las ventas y de los cobros confirmados.
 - Cantidad de pedidos y entregas finalizadas.
 - Fondo de asistencia: aportes contabilizados, asistencias efectivamente pagadas y saldo contable.
+
+La clasificación se basa en el esquema vigente del backend: `paymentMethod=efectivo` con `paymentStatus=cash_received` para efectivo, y `paymentMethod=mercadopago` con `paymentStatus=approved` para online. Los cobros en efectivo se imputan a `paymentReceivedAt`, no a la fecha original del pedido. Los pedidos pendientes no se cuentan como cobros. Reembolsos y contracargos no se cuentan como cobros aprobados.
 
 Los importes de venta se calculan sobre `pedidos.total`; ese campo actualmente representa el total de productos del pedido. No debe presentarse como ingreso neto, ganancia ni efectivo disponible. Antes de mostrar beneficios se deben incorporar costos, comisiones, impuestos, devoluciones y cargos de envío según el flujo real.
 
