@@ -377,12 +377,12 @@ app.post('/api/admin/orders/backfill-display-numbers', async (req, res) => {
       .slice(0, 100);
     let assigned = 0;
     for (const item of pending) {
-      await firestore.runTransaction(async transaction => {
+      const didAssign = await firestore.runTransaction(async transaction => {
         const [orderSnap, counterSnap] = await Promise.all([
           transaction.get(item.ref),
           transaction.get(counterRef)
         ]);
-        if (!orderSnap.exists || String(orderSnap.data().displayOrderNumber || '').trim() || isTestOrder(orderSnap.data())) return;
+        if (!orderSnap.exists || String(orderSnap.data().displayOrderNumber || '').trim() || isTestOrder(orderSnap.data())) return false;
         const lastNumber = counterSnap.exists ? Number(counterSnap.data().lastNumber || 0) : 0;
         if (!Number.isSafeInteger(lastNumber) || lastNumber < 0 || lastNumber >= Number.MAX_SAFE_INTEGER) {
           throw new Error('ORDER_NUMBER_SEQUENCE_INVALID');
@@ -390,12 +390,15 @@ app.post('/api/admin/orders/backfill-display-numbers', async (req, res) => {
         const nextNumber = lastNumber + 1;
         transaction.set(counterRef, { lastNumber: nextNumber, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
         transaction.update(item.ref, { displayOrderNumber: String(nextNumber).padStart(4, '0') });
-        assigned++;
+        return true;
       });
+      if (didAssign) assigned++;
     }
-    const remaining = Math.max(0, orders.filter(item =>
-      !String(item.data.displayOrderNumber || '').trim() && !isTestOrder(item.data)
-    ).length - assigned);
+    const finalSnapshot = await firestore.collection('pedidos').get();
+    const remaining = finalSnapshot.docs.filter(doc => {
+      const order = doc.data();
+      return !String(order.displayOrderNumber || '').trim() && !isTestOrder(order);
+    }).length;
     return res.json({ success: true, assigned, remaining, message: assigned
       ? 'Se asignaron números correlativos a pedidos históricos.'
       : 'No hay pedidos históricos pendientes de numeración.' });
