@@ -642,8 +642,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       const first = (await firestore.collection('pedidos').doc(legacyIds[0]).get()).data();
       const second = (await firestore.collection('pedidos').doc(legacyIds[1]).get()).data();
       const testOrder = (await firestore.collection('pedidos').doc(testId).get()).data();
-      assert.match(first.displayOrderNumber, /^\\d{4,}$/);
-      assert.match(second.displayOrderNumber, /^\\d{4,}$/);
+      assert.match(first.displayOrderNumber, /^\d{4,}$/);
+      assert.match(second.displayOrderNumber, /^\d{4,}$/);
       assert.ok(Number(first.displayOrderNumber) < Number(second.displayOrderNumber));
       assert.equal(testOrder.displayOrderNumber, undefined);
     } finally {
