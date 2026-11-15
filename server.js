@@ -15,6 +15,7 @@ const {
   InvalidWebhookSignatureError
 } = require('mercadopago');
 
+const { buildMercadoPagoPaymentMethods } = require('./lib/mercadopago-payment-methods');
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
@@ -1602,11 +1603,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
             pending: 'https://masayfantasias.com/?mp_return=1'
           },
           notification_url: 'https://masayfantasias-webhook-2026.onrender.com/api/webhook',
-          // Mantener tarjetas habilitadas, pero impedir cualquier financiación en cuotas.
-          payment_methods: {
-            installments: 1,
-            default_installments: 1
-          },
+          // Tarjetas habilitadas; máximo de una cuota impuesto por el servidor.
+          payment_methods: buildMercadoPagoPaymentMethods(),
           auto_return: 'approved'
         }
       });
