@@ -13,7 +13,7 @@ service cloud.firestore {
     }
 
     function inventoryManaged(data) {
-      return data.keys().hasAny(['stockQuantity'])
+      return data.keys().hasAny(['stockQuantity', 'stockReserved'])
         || (data.keys().hasAny(['stockManaged']) && data.stockManaged == true);
     }
 
