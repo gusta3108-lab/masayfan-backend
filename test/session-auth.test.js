@@ -4,8 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createSessionAuthenticator } = require('../lib/session-auth');
 
-function setup({ decoded = { uid: 'user-1', email: 'courier@example.com' }, verifyError = null, isAdmin = false } = {}) {
+function setup({ decoded = { uid: 'user-1', email: 'courier@example.com', email_verified: true }, verifyError = null, isAdmin = false, adminDocumentId = null } = {}) {
   const calls = [];
+  const adminDocLookups = [];
   const firebaseAuth = {
     async verifyIdToken(token, checkRevoked) {
       calls.push({ token, checkRevoked });
@@ -18,13 +19,13 @@ function setup({ decoded = { uid: 'user-1', email: 'courier@example.com' }, veri
       assert.equal(name, 'administradores');
       return {
         doc(email) {
-          assert.equal(email, decoded.email);
-          return { get: async () => ({ exists: isAdmin }) };
+          adminDocLookups.push(email);
+          return { get: async () => ({ exists: adminDocumentId ? email === adminDocumentId : isAdmin }) };
         }
       };
     }
   };
-  return { ...createSessionAuthenticator({ firebaseAuth, firestore }), calls };
+  return { ...createSessionAuthenticator({ firebaseAuth, firestore }), calls, adminDocLookups };
 }
 
 test('requires a Bearer token before verifying a session', async () => {
@@ -56,10 +57,38 @@ test('rejects verified sessions without an email claim', async () => {
   );
 });
 
+test('requires verified email for administrator privileges', async () => {
+  const auth = setup({ decoded: { uid: 'admin-1', email: 'admin@example.com', email_verified: false }, isAdmin: true });
+  await assert.rejects(auth.authenticatedAdmin({ headers: { authorization: 'Bearer admin-token' } }), { message: 'EMAIL_NOT_VERIFIED' });
+});
+
+test('normalizes administrator email before looking up its role document', async () => {
+  const auth = setup({ decoded: { uid: 'admin-1', email: ' Admin@Example.com ', email_verified: true }, isAdmin: true });
+  const user = await auth.authenticatedAdmin({ headers: { authorization: 'Bearer admin-token' } });
+  assert.equal(user.email, ' Admin@Example.com ');
+});
+
+test('preserves access to legacy mixed-case administrator document IDs', async () => {
+  const auth = setup({
+    decoded: { uid: 'admin-1', email: 'Admin@Example.com', email_verified: true },
+    adminDocumentId: 'Admin@Example.com'
+  });
+  const user = await auth.authenticatedAdmin({ headers: { authorization: 'Bearer admin-token' } });
+  assert.equal(user.email, 'Admin@Example.com');
+  assert.deepEqual(auth.adminDocLookups, ['admin@example.com', 'Admin@Example.com']);
+});
+
 test('allows an administrator only when their administrator document exists', async () => {
   const auth = setup({ isAdmin: true });
   const user = await auth.authenticatedAdmin({ headers: { authorization: 'Bearer admin-token' } });
   assert.equal(user.email, 'courier@example.com');
+});
+
+test('authenticatedVerifiedUser rejects unverified accounts without changing customer authentication', async () => {
+  const auth = setup({ decoded: { uid: 'user-1', email: 'customer@example.com', email_verified: false } });
+  const user = await auth.authenticatedUser({ headers: { authorization: 'Bearer customer-token' } });
+  assert.equal(user.email_verified, false);
+  await assert.rejects(auth.authenticatedVerifiedUser({ headers: { authorization: 'Bearer customer-token' } }), { message: 'EMAIL_NOT_VERIFIED' });
 });
 
 test('denies a valid customer or courier session from administrator endpoints', async () => {
