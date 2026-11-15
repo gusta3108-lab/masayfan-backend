@@ -137,6 +137,7 @@ async function priceCartItems(items) {
       const bannerSnap = await firestore.collection('banners').doc(String(item.bannerId)).get();
       if (!bannerSnap.exists) throw new Error('La promoción ya no está disponible.');
       const banner = bannerSnap.data();
+      if (banner.activo === false) throw new Error('La promoción ya no está disponible.');
       if (!banner.productId) throw new Error('La promoción no tiene un producto asociado.');
       const promoProductSnap = await firestore.collection('productos').doc(String(banner.productId)).get();
       if (!promoProductSnap.exists || promoProductSnap.data().activo === false) {
