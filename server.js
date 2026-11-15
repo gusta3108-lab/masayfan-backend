@@ -23,6 +23,8 @@ const { saveCourierProfileSafely, markCourierAssignment } = require('./lib/couri
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
+const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
+const { summarizeAccounting } = require('./lib/accounting-summary');
 
 const app = express();
 app.use(cors({
@@ -239,6 +241,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         externalReference: reference,
         paymentId: String(paymentId),
         paymentStatus: 'approved',
+        receivedInstallments: Number.isInteger(Number(payment.installments)) ? Number(payment.installments) : null,
         total: data?.total ?? null,
         currency: String(payment.currency_id || ''),
         receivedAmount: money(payment.transaction_amount || 0),
@@ -293,7 +296,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   }
 
   let validationFailure = null;
-  if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
+  if (hasInstallmentPolicyViolation(payment)) {
+    validationFailure = 'Mercado Pago informó un pago en más de una cuota; requiere revisión administrativa.';
+  } else if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
     validationFailure = 'El importe o la moneda del pago no coincide con el pedido.';
   } else if (!pending.preferenceId || (payment.preference_id && String(payment.preference_id) !== String(pending.preferenceId))) {
     // Mercado Pago puede omitir preference_id en el recurso Payment.
@@ -329,6 +334,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         paymentMethod: 'mercadopago',
         paymentId: String(paymentId),
         paymentStatus: 'approved',
+        mercadoPagoAccounting: buildMercadoPagoAccounting(payment),
         createdAt: new Date().toISOString()
       });
       transaction.delete(pendingRef);
@@ -338,6 +344,33 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
     return { verified: true, alreadyRegistered: false };
 }
+
+app.get('/api/admin/accounting-summary', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const [ordersSnapshot, fundSnapshot] = await Promise.all([
+      firestore.collection('pedidos').get(),
+      firestore.collection('fondo_asistencia_movimientos').get()
+    ]);
+    const summary = summarizeAccounting({
+      orders: ordersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      fundMovements: fundSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    });
+    return res.json({ success: true, summary });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
+      || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error consultando resumen contable:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para consultar contabilidad.'
+        : 'No se pudo consultar el resumen contable.'
+    });
+  }
+});
 
 app.get('/api/admin/payment-incidents', async (req, res) => {
   try {
