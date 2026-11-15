@@ -138,9 +138,10 @@ async function priceCartItems(items) {
       const bannerSnap = await firestore.collection('banners').doc(String(item.bannerId)).get();
       if (!bannerSnap.exists) throw new Error('La promoción ya no está disponible.');
       const banner = bannerSnap.data();
+      if (banner.activo === false) throw new Error('La promoción ya no está disponible.');
       if (!banner.productId) throw new Error('La promoción no tiene un producto asociado.');
       const promoProductSnap = await firestore.collection('productos').doc(String(banner.productId)).get();
-      if (!promoProductSnap.exists || promoProductSnap.data().activo === false) {
+      if (!promoProductSnap.exists || promoProductSnap.data().activo === false || promoProductSnap.data().archived === true) {
         throw new Error('El producto de esta promoción ya no está disponible.');
       }
       unitPrice = money(banner.promoPrice);
@@ -152,7 +153,7 @@ async function priceCartItems(items) {
       const productSnap = await firestore.collection('productos').doc(itemId).get();
       if (!productSnap.exists) throw new Error('Uno de los productos ya no existe.');
       const product = productSnap.data();
-      if (product.activo === false) throw new Error('Uno de los productos no está disponible.');
+      if (product.activo === false || product.archived === true) throw new Error('Uno de los productos no está disponible.');
       const basePrice = money(product.price ?? product.precio ?? 0);
       const discount = Number(product.discount || 0);
       if (!Number.isFinite(discount) || discount < 0 || discount > 100) {
