@@ -84,6 +84,8 @@ let baseUrl;
 let idToken;
 let userUid;
 let customerEmail = null;
+let adminEmail = null;
+let adminIdToken = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const noStockProductId = 'http-no-stock-' + randomUUID();
@@ -114,6 +116,34 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   idToken = authData.idToken;
   userUid = authData.localId;
 
+  adminEmail = 'admin-' + randomUUID() + '@example.test';
+  const adminSignup = await fetch(
+    'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
+      '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: adminEmail, password: 'EmulatorPass123!', returnSecureToken: true })
+    }
+  );
+  assert.equal(adminSignup.status, 200, 'Auth Emulator debe crear el administrador de prueba');
+  const adminSignupData = await adminSignup.json();
+  const { getAuth } = require('firebase-admin/auth');
+  await getAuth().updateUser(adminSignupData.localId, { emailVerified: true });
+  const adminSignIn = await fetch(
+    'http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST +
+      '/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-api-key',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: adminEmail, password: 'EmulatorPass123!', returnSecureToken: true })
+    }
+  );
+  assert.equal(adminSignIn.status, 200, 'Auth Emulator debe emitir un token para el administrador verificado');
+  adminIdToken = (await adminSignIn.json()).idToken;
+  const verifiedAdminToken = await getAuth().verifyIdToken(adminIdToken);
+  assert.equal(verifiedAdminToken.email_verified, true, 'El token administrativo debe incluir email_verified=true');
+
   await firestore.collection('productos').doc(productId).set({
     name: 'Producto HTTP de prueba',
     price: 100,
@@ -124,6 +154,27 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     authorization: 'Bearer ' + idToken,
     'content-type': 'application/json'
   };
+
+  await t.test('bloquea administradores y repartidores no verificados sin afectar al cliente', async () => {
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const courierId = crypto.createHash('sha256').update(customerEmail.trim().toLowerCase()).digest('hex');
+    const courierRef = firestore.collection('repartidores').doc(courierId);
+    await adminRef.set({ enabled: true });
+    await courierRef.set({ email: customerEmail, active: true });
+    try {
+      const adminResponse = await fetch(baseUrl + '/api/admin/payment-incidents', { headers });
+      const adminBody = await adminResponse.json();
+      assert.equal(adminResponse.status, 403, JSON.stringify(adminBody));
+      assert.equal(adminBody.code, 'EMAIL_NOT_VERIFIED');
+
+      const courierResponse = await fetch(baseUrl + '/api/courier/orders', { headers });
+      const courierBody = await courierResponse.json();
+      assert.equal(courierResponse.status, 403, JSON.stringify(courierBody));
+      assert.equal(courierBody.code, 'EMAIL_NOT_VERIFIED');
+    } finally {
+      await Promise.all([adminRef.delete(), courierRef.delete()]);
+    }
+  });
   const order = {
     clientName: 'Cliente de prueba',
     clientPhone: '1111111111',
@@ -353,10 +404,10 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
       paymentMethod: 'mercadopago',
       paymentStatus: 'approved',
     });
-    await firestore.collection('administradores').doc(customerEmail).set({ enabled: true });
+    await firestore.collection('administradores').doc(adminEmail).set({ enabled: true });
 
     const endpoint = baseUrl + '/api/admin/orders/' + refundOrderId + '/status';
-    const adminHeaders = { ...headers, 'content-type': 'application/json' };
+    const adminHeaders = { authorization: 'Bearer ' + adminIdToken, 'content-type': 'application/json' };
     const beforeRefund = await fetch(endpoint, {
       method: 'POST',
       headers: adminHeaders,
@@ -387,7 +438,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     const testOrderId = 'http-test-order-' + randomUUID();
     const testProductId = 'http-test-product-' + randomUUID();
     const orderRef = firestore.collection('pedidos').doc(testOrderId);
-    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const adminRef = firestore.collection('administradores').doc(adminEmail);
     await orderRef.set({
       esPrueba: true,
       status: 'nuevo',
@@ -399,7 +450,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
 
     try {
       const endpoint = baseUrl + '/api/admin/orders/' + testOrderId + '/status';
-      const adminHeaders = { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' };
+      const adminHeaders = { authorization: 'Bearer ' + adminIdToken, 'content-type': 'application/json' };
       for (const status of ['preparacion', 'listo', 'finalizado']) {
         const response = await fetch(endpoint, {
           method: 'POST',
@@ -436,7 +487,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     const retryReference = randomUUID();
     const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
     const retryIncidentId = retryReference;
-    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const adminRef = firestore.collection('administradores').doc(adminEmail);
     const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
     const incidentRef = firestore.collection('incidencias_pagos').doc(retryIncidentId);
     const originalPayment = globalThis.__masayMockPayment;
@@ -482,7 +533,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
 
     try {
       const endpoint = baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryIncidentId + '/retry-approved-payment';
-      const headers = { authorization: 'Bearer ' + idToken };
+      const headers = { authorization: 'Bearer ' + adminIdToken };
       const attempts = await Promise.all([
         fetch(endpoint, { method: 'POST', headers }),
         fetch(endpoint, { method: 'POST', headers })
@@ -512,7 +563,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     const retryProductId = 'http-retry-empty-' + randomUUID();
     const retryReference = randomUUID();
     const retryPaymentId = String(Math.floor(100000000 + Math.random() * 900000000));
-    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const adminRef = firestore.collection('administradores').doc(adminEmail);
     const pendingRef = firestore.collection('pagos_pendientes').doc(retryReference);
     const incidentRef = firestore.collection('incidencias_pagos').doc(retryReference);
     const originalPayment = globalThis.__masayMockPayment;
@@ -557,7 +608,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     try {
       const response = await fetch(
         baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + retryReference + '/retry-approved-payment',
-        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+        { method: 'POST', headers: { authorization: 'Bearer ' + adminIdToken } }
       );
       const body = await response.json();
       assert.equal(response.status, 200, JSON.stringify(body));
@@ -577,7 +628,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
 
   await t.test('el endpoint de reintento rechaza incidencias incompletas antes de consultar el pago', async () => {
     const incidentId = randomUUID();
-    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const adminRef = firestore.collection('administradores').doc(adminEmail);
     const incidentRef = firestore.collection('incidencias_pagos').doc(incidentId);
     const paymentFetchesBefore = globalThis.__masayMockPaymentFetches;
     await adminRef.set({ enabled: true });
@@ -591,7 +642,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     try {
       const response = await fetch(
         baseUrl + '/api/admin/payment-incidents/incidencias_pagos/' + incidentId + '/retry-approved-payment',
-        { method: 'POST', headers: { authorization: 'Bearer ' + idToken } }
+        { method: 'POST', headers: { authorization: 'Bearer ' + adminIdToken } }
       );
       const body = await response.json();
       assert.equal(response.status, 409, JSON.stringify(body));
@@ -606,7 +657,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
   });
 
   await t.test('el backfill asigna correlativos a pedidos históricos sin tocar pedidos de prueba', async () => {
-    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    const adminRef = firestore.collection('administradores').doc(adminEmail);
     const counterRef = firestore.collection('secuencias').doc('pedidos');
     const base = Date.now();
     const legacyIds = [randomUUID(), randomUUID()];
@@ -631,7 +682,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     try {
       const response = await fetch(baseUrl + '/api/admin/orders/backfill-display-numbers', {
         method: 'POST',
-        headers: { authorization: 'Bearer ' + idToken }
+        headers: { authorization: 'Bearer ' + adminIdToken }
       });
       const body = await response.json();
       assert.equal(response.status, 200, JSON.stringify(body));
@@ -660,7 +711,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('productos').doc(noStockProductId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
-    if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
+    if (customerEmail) await firestore.collection('administradores').doc(adminEmail).delete();
     if (raceExternalReference) {
       await firestore.collection('pagos_pendientes').doc(raceExternalReference).delete();
     }
