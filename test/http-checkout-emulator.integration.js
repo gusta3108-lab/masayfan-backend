@@ -605,6 +605,61 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     }
   });
 
+
+  await t.test('el backend impide registrar liquidaciones hasta que administración revise los datos de cobro', async () => {
+    const courierEmail = 'payout-' + randomUUID() + '@example.test';
+    const courierId = crypto.createHash('sha256').update(courierEmail).digest('hex');
+    const courierRef = firestore.collection('repartidores').doc(courierId);
+    const movementRef = firestore.collection('courier_wallet_movements').doc(randomUUID());
+    const adminRef = firestore.collection('administradores').doc(customerEmail);
+    await adminRef.set({ enabled: true });
+    await courierRef.set({
+      email: courierEmail, name: 'Repartidor de prueba', active: true,
+      paymentAlias: 'prueba.masay', paymentHolder: 'Titular de prueba',
+      paymentCbuCvu: '', paymentVerified: false
+    });
+    await movementRef.set({ courierId, amount: 5000, status: 'online_pending' });
+    const payoutUrl = baseUrl + '/api/admin/couriers/' + courierId + '/payouts';
+    const verifyUrl = baseUrl + '/api/admin/couriers/' + courierId + '/payment-profile/verify';
+    try {
+      const blocked = await fetch(payoutUrl, {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' },
+        body: JSON.stringify({ amount: 1000, reference: 'test-no-real-transfer' })
+      });
+      const blockedBody = await blocked.json();
+      assert.equal(blocked.status, 409, JSON.stringify(blockedBody));
+      assert.match(blockedBody.error, /no fueron revisados/i);
+      assert.equal((await courierRef.get()).data().paymentVerified, false,
+        'un intento de liquidación no debe marcar automáticamente los datos como revisados');
+      assert.equal((await firestore.collection('courier_payouts').where('courierId', '==', courierId).get()).size, 0);
+
+      const verified = await fetch(verifyUrl, {
+        method: 'POST', headers: { authorization: 'Bearer ' + idToken }
+      });
+      const verifiedBody = await verified.json();
+      assert.equal(verified.status, 200, JSON.stringify(verifiedBody));
+      assert.equal(verifiedBody.paymentVerified, true);
+
+      const allowed = await fetch(payoutUrl, {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + idToken, 'content-type': 'application/json' },
+        body: JSON.stringify({ amount: 1000, reference: 'test-already-paid-transfer' })
+      });
+      const allowedBody = await allowed.json();
+      assert.equal(allowed.status, 201, JSON.stringify(allowedBody));
+      assert.equal(allowedBody.amount, 1000);
+      assert.equal((await courierRef.get()).data().paymentVerified, true);
+      assert.equal((await firestore.collection('courier_payouts').where('courierId', '==', courierId).get()).size, 1);
+    } finally {
+      const payouts = await firestore.collection('courier_payouts').where('courierId', '==', courierId).get();
+      await Promise.all(payouts.docs.map(doc => doc.ref.delete()));
+      await movementRef.delete();
+      await courierRef.delete();
+      await adminRef.delete();
+    }
+  });
+
   t.after(async () => {
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
