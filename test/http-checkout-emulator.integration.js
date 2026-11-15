@@ -87,7 +87,8 @@ let customerEmail = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const noStockProductId = 'http-no-stock-' + randomUUID();
-const inactiveBannerId = 'http-banner-inactive-' + randomUUID();
+const archivedProductId = 'http-archived-product-' + randomUUID();
+const archivedBannerId = 'http-archived-banner-' + randomUUID();
 const restoreProductId = 'http-restore-' + randomUUID();
 const refundOrderId = 'http-refund-order-' + randomUUID();
 let raceOrderId = null;
@@ -198,27 +199,46 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore, 'un producto desactivado no debe llegar a Mercado Pago');
   });
 
-  await t.test('una promoción desactivada no puede generar un checkout aunque su producto siga activo', async () => {
-    await firestore.collection('banners').doc(inactiveBannerId).set({
-      title: 'Promoción pausada de prueba',
-      productId,
+  await t.test('un producto archivado y su promoción no pueden generar un checkout', async () => {
+    await firestore.collection('productos').doc(archivedProductId).set({
+      name: 'Producto archivado de prueba',
+      price: 100,
+      activo: true,
+      archived: true
+    });
+    await firestore.collection('banners').doc(archivedBannerId).set({
+      title: 'Promoción de producto archivado',
+      productId: archivedProductId,
       promoPrice: 50,
-      activo: false
+      productName: 'Producto archivado de prueba'
     });
     const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
-    const response = await fetch(baseUrl + '/api/crear-preferencia', {
+
+    const productResponse = await fetch(baseUrl + '/api/crear-preferencia', {
       method: 'POST',
       headers: { ...headers, 'Idempotency-Key': randomUUID() },
       body: JSON.stringify({
-        items: [{ bannerId: inactiveBannerId, qty: 1, price: 50, options: '' }],
+        items: [{ id: archivedProductId, qty: 1, price: 100, options: '' }],
         order
       })
     });
-    const body = await response.json();
-    assert.equal(response.status, 400, JSON.stringify(body));
-    assert.match(body.error, /promoción ya no está disponible/i);
+    const productBody = await productResponse.json();
+    assert.equal(productResponse.status, 400, JSON.stringify(productBody));
+    assert.match(productBody.error, /no está disponible/i);
+
+    const bannerResponse = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({
+        items: [{ bannerId: archivedBannerId, qty: 1, price: 50, options: '' }],
+        order
+      })
+    });
+    const bannerBody = await bannerResponse.json();
+    assert.equal(bannerResponse.status, 400, JSON.stringify(bannerBody));
+    assert.match(bannerBody.error, /promoción ya no está disponible/i);
     assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore,
-      'una promoción desactivada no debe llegar a Mercado Pago');
+      'productos y promociones archivados no deben llegar a Mercado Pago');
   });
 
   await t.test('Mercado Pago crea el checkout y el webhook simulado registra una sola orden y el webhook simulado confirma una sola venta', async () => {
@@ -688,7 +708,8 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
     await firestore.collection('productos').doc(noStockProductId).delete();
-    await firestore.collection('banners').doc(inactiveBannerId).delete();
+    await firestore.collection('banners').doc(archivedBannerId).delete();
+    await firestore.collection('productos').doc(archivedProductId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
     if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
