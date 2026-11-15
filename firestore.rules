@@ -78,8 +78,8 @@ service cloud.firestore {
         && request.resource.data.termsAccepted == true
         && request.resource.data.termsVersion == '1.0'
         && request.resource.data.privacyVersion == '1.0'
-        && request.resource.data.termsAcceptedAt == request.time
-        && request.resource.data.createdAt == request.time;
+        && request.resource.data.termsAcceptedAt is timestamp
+        && request.resource.data.createdAt is timestamp;
       allow update, delete: if false;
     }
 
