@@ -55,13 +55,18 @@ test('fund balance is contributions minus approved assistance payments only', ()
     fundMovements: [
       { type: 'contribution', status: 'posted', amount: 500 },
       { type: 'contribution', status: 'posted', amount: 250 },
+      { type: 'contribution', status: 'accrued', amount: 100 },
+      { type: 'bank_deposit', status: 'posted', amount: 400 },
       { type: 'assistance', status: 'posted', amount: 300 },
       { type: 'assistance', status: 'pending', amount: 1000 },
       { type: 'contribution', status: 'void', amount: 800 }
     ]
   });
-  assert.equal(result.assistanceFund.contributions, 750);
+  assert.equal(result.assistanceFund.contributions, 850);
+  assert.equal(result.assistanceFund.deposited, 400);
+  assert.equal(result.assistanceFund.pendingDeposit, 450);
   assert.equal(result.assistanceFund.assistancePaid, 300);
-  assert.equal(result.assistanceFund.bookBalance, 450);
+  assert.equal(result.assistanceFund.bookBalance, 550);
+  assert.equal(result.assistanceFund.bankLedgerBalance, 100);
   assert.equal(result.assistanceFund.bankReconciled, false);
 });
