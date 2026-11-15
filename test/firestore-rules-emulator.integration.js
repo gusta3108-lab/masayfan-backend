@@ -7,6 +7,10 @@ const { randomUUID } = require('node:crypto');
 const projectId = 'masayfantasias';
 const firestoreBase = `http://127.0.0.1:8080/v1/projects/${projectId}/databases/(default)/documents`;
 const authBase = 'http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signUp?key=emulator-api-key';
+const { initializeApp, getApps } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+const adminApp = getApps().find(app => app.name === '[DEFAULT]') || initializeApp({ projectId });
+const emulatorAuth = getAuth(adminApp);
 
 async function createUser({ verified = false } = {}) {
   const email = `rules-${randomUUID()}@example.test`;
@@ -21,13 +25,9 @@ async function createUser({ verified = false } = {}) {
   const user = JSON.parse(responseText);
   if (!verified) return user;
 
-  const update = await fetch('http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:update?key=emulator-api-key', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ idToken: user.idToken, emailVerified: true, returnSecureToken: true })
-  });
-  const updateText = await update.text();
-  assert.equal(update.status, 200, updateText);
+  await emulatorAuth.updateUser(user.localId, { emailVerified: true });
+  const updatedUser = await emulatorAuth.getUser(user.localId);
+  assert.equal(updatedUser.emailVerified, true, 'Auth Emulator debe guardar el correo verificado');
 
   const signIn = await fetch('http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=emulator-api-key', {
     method: 'POST',
@@ -36,7 +36,10 @@ async function createUser({ verified = false } = {}) {
   });
   const signInText = await signIn.text();
   assert.equal(signIn.status, 200, signInText);
-  return JSON.parse(signInText);
+  const signedInUser = JSON.parse(signInText);
+  const decoded = await emulatorAuth.verifyIdToken(signedInUser.idToken);
+  assert.equal(decoded.email_verified, true, 'El token nuevo debe incluir email_verified=true');
+  return signedInUser;
 }
 
 async function seed(path, fields) {
