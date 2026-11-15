@@ -15,6 +15,7 @@ const {
   InvalidWebhookSignatureError
 } = require('mercadopago');
 
+const { summarizeAccounting } = require('./lib/accounting-summary');
 const { isAllowedOrigin } = require('./lib/cors-origin');
 const { createSessionAuthenticator } = require('./lib/session-auth');
 const { registerAdminPushToken, removeAdminPushToken, sendAdminOrderPushNotifications } = require('./lib/admin-push-notifications');
@@ -337,6 +338,33 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
     return { verified: true, alreadyRegistered: false };
 }
+
+app.get('/api/admin/accounting-summary', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    await authenticatedAdmin(req);
+    const [ordersSnapshot, fundSnapshot] = await Promise.all([
+      firestore.collection('pedidos').get(),
+      firestore.collection('fondo_asistencia_movimientos').get()
+    ]);
+    const summary = summarizeAccounting({
+      orders: ordersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      fundMovements: fundSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    });
+    return res.json({ success: true, summary });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
+      || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error consultando resumen contable:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para consultar contabilidad.'
+        : 'No se pudo consultar el resumen contable.'
+    });
+  }
+});
 
 app.get('/api/admin/payment-incidents', async (req, res) => {
   try {
