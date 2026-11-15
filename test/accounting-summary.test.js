@@ -35,6 +35,29 @@ test('summary separates cash, online, pending and gross sales; excludes test ord
   assert.equal(result.sales.deliveredOrdersToday, 1);
 });
 
+test('Mercado Pago fee and net totals use only values returned by the payment API', () => {
+  const result = summarizeAccounting({
+    now: new Date('2026-11-15T15:00:00.000Z'),
+    orders: [
+      {
+        total: 10000, paymentMethod: 'mercadopago', paymentStatus: 'approved',
+        createdAt: '2026-11-15T14:00:00.000Z',
+        mercadoPagoAccounting: { feeTotal: 700, netReceivedAmount: 9300 }
+      },
+      {
+        total: 5000, paymentMethod: 'mercadopago', paymentStatus: 'approved',
+        createdAt: '2026-11-02T14:00:00.000Z'
+      }
+    ]
+  });
+  assert.equal(result.sales.onlineFeeToday, 700);
+  assert.equal(result.sales.onlineNetReceivedToday, 9300);
+  assert.equal(result.sales.onlineFeeMonth, 700);
+  assert.equal(result.sales.onlineNetReceivedMonth, 9300);
+  assert.equal(result.sales.onlinePaidOrdersMonth, 2);
+  assert.equal(result.sales.onlineFeeDataCountMonth, 1);
+});
+
 test('cash collection is counted on the date it was actually received', () => {
   const result = summarizeAccounting({
     now: new Date('2026-11-15T15:00:00.000Z'),
