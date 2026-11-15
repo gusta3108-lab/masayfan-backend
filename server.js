@@ -352,7 +352,7 @@ app.post('/api/admin/orders/backfill-display-numbers', async (req, res) => {
     const orders = snapshot.docs.map(doc => ({ ref: doc.ref, id: doc.id, data: doc.data() }));
     const numericValues = orders
       .map(item => String(item.data.displayOrderNumber || '').trim())
-      .filter(value => /^\\d+$/.test(value))
+      .filter(value => /^\d+$/.test(value))
       .map(Number)
       .filter(Number.isSafeInteger);
     const highestExisting = numericValues.reduce((maximum, value) => Math.max(maximum, value), 0);
