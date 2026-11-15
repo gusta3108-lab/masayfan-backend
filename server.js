@@ -2135,6 +2135,9 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
       if (!paymentProfile.paymentHolder || (!paymentProfile.paymentAlias && !/^\d{22}$/.test(String(paymentProfile.paymentCbuCvu || '')))) {
         throw new Error('PAYMENT_PROFILE_INCOMPLETE');
       }
+      if (paymentProfile.paymentVerified !== true) {
+        throw new Error('PAYMENT_PROFILE_UNVERIFIED');
+      }
       const onlinePending = movementsSnap.docs
         .filter(doc => doc.data().status === 'online_pending')
         .reduce((sum, doc) => sum + Math.max(0, Number(doc.data().amount) || 0), 0);
@@ -2145,13 +2148,6 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
       // El efectivo que el repartidor ya cobró compensa lo que Masay le debe por pedidos online.
       const balanceToPay = Math.round(Math.max(0, onlinePending - cashReceived - paidOutTotal) * 100) / 100;
       if (amount > balanceToPay) throw new Error('PAYOUT_EXCEEDS_BALANCE');
-      if (paymentProfile.paymentVerified !== true) {
-        transaction.update(courierRef, {
-          paymentVerified: true,
-          paymentVerifiedAt: FieldValue.serverTimestamp(),
-          paymentVerifiedBy: String(admin.email).toLowerCase()
-        });
-      }
       transaction.update(courierRef, { paidOutTotal: Math.round((paidOutTotal + amount) * 100) / 100 });
       transaction.create(payoutRef, {
         courierId, amount, reference,
@@ -2168,6 +2164,7 @@ app.post('/api/admin/couriers/:courierId/payouts', async (req, res) => {
   } catch (error) {
     if (error.message === 'COURIER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El repartidor no existe.' });
     if (error.message === 'PAYMENT_PROFILE_INCOMPLETE') return res.status(409).json({ success: false, error: 'El repartidor debe cargar el titular y un alias o CBU/CVU válido antes de liquidar.' });
+    if (error.message === 'PAYMENT_PROFILE_UNVERIFIED') return res.status(409).json({ success: false, error: 'Los datos de cobro todavía no fueron revisados por administración.' });
     if (error.message === 'PAYOUT_EXCEEDS_BALANCE') return res.status(409).json({ success: false, error: 'El pago supera el saldo pendiente de liquidación.' });
     if (error.message === 'ADMIN_REQUIRED') return res.status(403).json({ success: false, error: 'No tenés permisos para registrar pagos.' });
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
