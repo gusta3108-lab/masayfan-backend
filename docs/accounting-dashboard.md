@@ -29,6 +29,7 @@ La aplicación debe permitir registrar un depósito/transferencia a la cuenta se
 No se debe tratar un aporte devengado en el libro como dinero ya depositado. La conciliación bancaria se mantiene pendiente hasta que el usuario registre/valide el movimiento real.
 
 ## Seguridad y activación
+- El resumen se consulta mediante `GET /api/admin/accounting-summary`, protegido por autenticación de administrador; devuelve agregados y no expone datos personales de los pedidos.
 - Consultas y operaciones solo para administradores autenticados.
 - Libro inmutable: corregir con asientos de reversión, no borrar movimientos.
 - Sin transferencias automáticas ni débitos en cuentas.
