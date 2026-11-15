@@ -254,6 +254,19 @@ test('Firestore rules authorize the admin console without exposing admin data to
     assert.equal(response.status, 403);
   });
 
+  await t.test('el administrador no puede crear productos con reservas de inventario aunque falte stockQuantity', async () => {
+    const response = await request('productos', {
+      token: admin.idToken,
+      method: 'POST',
+      body: { fields: {
+        name: { stringValue: 'Producto con reserva no autorizada' },
+        activo: { booleanValue: true },
+        stockReserved: { integerValue: '1' }
+      } }
+    });
+    assert.equal(response.status, 403);
+  });
+
   await t.test('el administrador no puede activar inventario por stockManaged en un producto existente', async () => {
     const response = await request(`productos/${productId}`, {
       token: admin.idToken,
