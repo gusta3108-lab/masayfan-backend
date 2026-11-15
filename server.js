@@ -22,6 +22,7 @@ const { saveCourierProfileSafely, markCourierAssignment } = require('./lib/couri
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
+const { buildMercadoPagoAccounting } = require('./lib/mercadopago-payment-accounting');
 const { summarizeAccounting } = require('./lib/accounting-summary');
 
 const app = express();
@@ -329,6 +330,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         paymentMethod: 'mercadopago',
         paymentId: String(paymentId),
         paymentStatus: 'approved',
+        mercadoPagoAccounting: buildMercadoPagoAccounting(payment),
         createdAt: new Date().toISOString()
       });
       transaction.delete(pendingRef);
