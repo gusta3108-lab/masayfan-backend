@@ -87,6 +87,7 @@ let customerEmail = null;
 const productId = 'http-checkout-' + randomUUID();
 const raceProductId = 'http-race-' + randomUUID();
 const noStockProductId = 'http-no-stock-' + randomUUID();
+const inactiveBannerId = 'http-banner-inactive-' + randomUUID();
 const restoreProductId = 'http-restore-' + randomUUID();
 const refundOrderId = 'http-refund-order-' + randomUUID();
 let raceOrderId = null;
@@ -195,6 +196,29 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     assert.equal(response.status, 400, JSON.stringify(body));
     assert.match(body.error, /no está disponible/i);
     assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore, 'un producto desactivado no debe llegar a Mercado Pago');
+  });
+
+  await t.test('una promoción desactivada no puede generar un checkout aunque su producto siga activo', async () => {
+    await firestore.collection('banners').doc(inactiveBannerId).set({
+      title: 'Promoción pausada de prueba',
+      productId,
+      promoPrice: 50,
+      activo: false
+    });
+    const preferenceCallsBefore = globalThis.__masayMockPreferenceCalls;
+    const response = await fetch(baseUrl + '/api/crear-preferencia', {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': randomUUID() },
+      body: JSON.stringify({
+        items: [{ bannerId: inactiveBannerId, qty: 1, price: 50, options: '' }],
+        order
+      })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.match(body.error, /promoción ya no está disponible/i);
+    assert.equal(globalThis.__masayMockPreferenceCalls, preferenceCallsBefore,
+      'una promoción desactivada no debe llegar a Mercado Pago');
   });
 
   await t.test('Mercado Pago crea el checkout y el webhook simulado registra una sola orden y el webhook simulado confirma una sola venta', async () => {
@@ -664,6 +688,7 @@ test('HTTP efectivo y Mercado Pago simulado completan compras sin tocar producci
     await firestore.collection('productos').doc(productId).delete();
     await firestore.collection('productos').doc(raceProductId).delete();
     await firestore.collection('productos').doc(noStockProductId).delete();
+    await firestore.collection('banners').doc(inactiveBannerId).delete();
     await firestore.collection('productos').doc(restoreProductId).delete();
     await firestore.collection('pedidos').doc(refundOrderId).delete();
     if (customerEmail) await firestore.collection('administradores').doc(customerEmail).delete();
