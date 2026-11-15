@@ -14,6 +14,8 @@ La clasificación se basa en el esquema vigente del backend: `paymentMethod=efec
 
 Los importes de venta se calculan sobre `pedidos.total`; ese campo actualmente representa el total de productos del pedido. No debe presentarse como ingreso neto, ganancia ni efectivo disponible. Antes de mostrar beneficios se deben incorporar costos, comisiones, impuestos, devoluciones y cargos de envío según el flujo real.
 
+En cada pago online aprobado se conserva el detalle real que devuelve Mercado Pago (`fee_details`, `transaction_details.net_received_amount`, método, tipo y cuotas). El resumen suma comisiones y neto solo cuando esos campos están presentes; no inventa porcentajes ni estima datos históricos faltantes. La cobertura informa cuántos pagos aprobados cuentan con detalle.
+
 ## Fondo de asistencia
 - Cada aporte debe originarse en una contribución adicional de Masa y Fantasías, no en una retención al prestador.
 - El aporte se contabiliza una sola vez por pedido, al completarse y verificarse la entrega.
