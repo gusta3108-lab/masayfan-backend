@@ -22,7 +22,7 @@ const { saveCourierProfileSafely, markCourierAssignment } = require('./lib/couri
 const { courierDocumentId, normalizeCourier, canCourierUpdateOrderStatus, hasActiveCourierDeliveries, buildCourierOrder, hasCompleteDeliveryCoordinates, buildCourierWhatsAppUrl, optimizeDeliveryStops, appendDeliveryStops, buildGoogleMapsRouteUrl, buildGoogleMapsRouteSegments, buildBatchCourierWhatsAppUrl, buildDeliveryIssueHistoryEntry, buildDeliveryClosureHistoryEntry } = require('./lib/delivery');
 const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCourierCashSettlement, summarizeCourierWallet, isCourierOfferVisible } = require('./lib/courier-wallet');
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
-const { buildMercadoPagoAccounting } = require('./lib/mercadopago-payment-accounting');
+const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
 const { summarizeAccounting } = require('./lib/accounting-summary');
 
 const app = express();
@@ -240,6 +240,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
         externalReference: reference,
         paymentId: String(paymentId),
         paymentStatus: 'approved',
+        receivedInstallments: Number.isInteger(Number(payment.installments)) ? Number(payment.installments) : null,
         total: data?.total ?? null,
         currency: String(payment.currency_id || ''),
         receivedAmount: money(payment.transaction_amount || 0),
@@ -294,7 +295,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   }
 
   let validationFailure = null;
-  if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
+  if (hasInstallmentPolicyViolation(payment)) {
+    validationFailure = 'Mercado Pago informó un pago en más de una cuota; requiere revisión administrativa.';
+  } else if (payment.currency_id !== 'ARS' || money(payment.transaction_amount) !== money(pending.total)) {
     validationFailure = 'El importe o la moneda del pago no coincide con el pedido.';
   } else if (!pending.preferenceId || (payment.preference_id && String(payment.preference_id) !== String(pending.preferenceId))) {
     // Mercado Pago puede omitir preference_id en el recurso Payment.
