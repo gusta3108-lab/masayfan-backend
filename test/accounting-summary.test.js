@@ -58,6 +58,22 @@ test('Mercado Pago fee and net totals use only values returned by the payment AP
   assert.equal(result.sales.onlineFeeDataCountMonth, 1);
 });
 
+
+test('online collection is assigned to Mercado Pago approval date when available', () => {
+  const result = summarizeAccounting({
+    now: new Date('2026-11-15T15:00:00.000Z'),
+    orders: [{
+      total: 12000,
+      paymentMethod: 'mercadopago',
+      paymentStatus: 'approved',
+      createdAt: '2026-11-14T15:00:00.000Z',
+      mercadoPagoAccounting: { approvedAt: '2026-11-15T14:00:00.000Z' }
+    }]
+  });
+  assert.equal(result.sales.onlineCollectedToday, 12000);
+  assert.equal(result.sales.onlineCollectedMonth, 12000);
+});
+
 test('cash collection is counted on the date it was actually received', () => {
   const result = summarizeAccounting({
     now: new Date('2026-11-15T15:00:00.000Z'),
