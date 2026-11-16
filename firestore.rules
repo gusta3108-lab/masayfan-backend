@@ -72,9 +72,14 @@ service cloud.firestore {
       allow list: if false;
       allow create: if signedIn()
         && request.auth.uid == uid
-        && request.resource.data.keys().hasOnly(['correo', 'createdAt'])
-        && request.resource.data.keys().hasAll(['correo', 'createdAt'])
-        && request.resource.data.correo == request.auth.token.email;
+        && request.resource.data.keys().hasOnly(['correo', 'createdAt', 'termsAccepted', 'termsVersion', 'termsAcceptedAt', 'privacyVersion'])
+        && request.resource.data.keys().hasAll(['correo', 'createdAt', 'termsAccepted', 'termsVersion', 'termsAcceptedAt', 'privacyVersion'])
+        && request.resource.data.correo == request.auth.token.email
+        && request.resource.data.termsAccepted == true
+        && request.resource.data.termsVersion == '1.0'
+        && request.resource.data.privacyVersion == '1.0'
+        && request.resource.data.termsAcceptedAt is timestamp
+        && request.resource.data.createdAt is timestamp;
       allow update, delete: if false;
     }
 
