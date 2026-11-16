@@ -1570,7 +1570,6 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     await requireCustomerAccount(user, firestore);
-    checkoutMark('authentication');
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
