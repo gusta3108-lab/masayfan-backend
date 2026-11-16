@@ -1570,6 +1570,7 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
     if (!requireFirebaseServices(res)) return;
     const user = await authenticatedUser(req);
     await requireCustomerAccount(user, firestore);
+    checkoutMark('authentication');
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
@@ -1655,10 +1656,13 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
 });
 
 app.post('/api/crear-preferencia', async (req, res) => {
+  const checkoutStartedAt = Date.now();
+  const checkoutMark = (phase, startedAt = checkoutStartedAt) => console.info('[checkout_timing]', JSON.stringify({ phase, durationMs: Date.now() - startedAt, totalMs: Date.now() - checkoutStartedAt }));
   try {
     if (!requireServices(res)) return;
     const user = await authenticatedUser(req);
     await requireCustomerAccount(user, firestore);
+    checkoutMark('authentication');
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
@@ -1682,7 +1686,9 @@ app.post('/api/crear-preferencia', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Completá nombre, teléfono y dirección.' });
     }
 
+    const pricingStartedAt = Date.now();
     const pricedItems = await priceCartItems(items);
+    checkoutMark('cart_pricing', pricingStartedAt);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
     const orderData = { clientName, clientPhone, address, notes, ...(deliveryLocation ? { deliveryLocation } : {}), items: pricedItems, total };
     const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'mercadopago');
@@ -1697,6 +1703,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
 
     // La clave y la reserva se registran en una sola transacción. Los reintentos
     // concurrentes no pueden reservar unidades ni crear preferencias duplicadas.
+    const reservationStartedAt = Date.now();
     await firestore.runTransaction(async transaction => {
       needsAdminReview = false;
       const idempotencySnap = await transaction.get(idempotency.ref);
@@ -1773,6 +1780,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
       });
     });
 
+    checkoutMark('firestore_reservation_and_idempotency', reservationStartedAt);
+
     if (needsAdminReview) {
       return res.status(409).json({ success: false, code: 'CHECKOUT_NEEDS_REVIEW', error: 'Este intento de pago requiere revisión administrativa. No vuelvas a pagar ni generes otro intento hasta que lo revisemos.' });
     }
@@ -1787,6 +1796,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
     }
 
     try {
+      const mercadoPagoStartedAt = Date.now();
       const result = await preference.create({
         body: {
           items: pricedItems.map(item => ({
@@ -1812,6 +1822,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
         }
       });
 
+      checkoutMark('mercadopago_preference_api', mercadoPagoStartedAt);
+      const persistenceStartedAt = Date.now();
       // El enlace solo se entrega después de persistir el ID de preferencia.
       await pendingRef.update({
         preferenceId: String(result.id),
@@ -1824,6 +1836,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
         preferenceId: String(result.id),
         completedAt: FieldValue.serverTimestamp()
       });
+      checkoutMark('firestore_preference_persistence', persistenceStartedAt);
+      checkoutMark('total_before_response');
       return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString(), replayed: false });
     } catch (preferenceError) {
       // Un timeout o error de red no demuestra que Mercado Pago no haya creado
