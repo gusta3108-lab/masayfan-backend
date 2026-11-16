@@ -1,4 +1,6 @@
 const express = require('express');
+
+const { nextOrderSequence, formatPublicOrderNumber } = require('./lib/order-number');
 const crypto = require('node:crypto');
 const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder, isTestOrder } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
@@ -328,8 +330,11 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
+      const displayOrderNumber = await allocatePublicOrderNumber(transaction);
       transaction.set(orderRef, {
         ...data.order,
+        displayOrderNumber,
+        publicOrderNumber: displayOrderNumber,
         userEmail: data.userEmail,
         uid: data.uid,
         status: 'nuevo',
@@ -1542,6 +1547,24 @@ app.post('/api/admin/orders/:orderId/delete', async (req, res) => {
   }
 });
 
+async function allocatePublicOrderNumber(transaction) {
+  const counterRef = firestore.collection('contadores').doc('pedidos');
+  const counterSnap = await transaction.get(counterRef);
+  let existingOrders = null;
+  if (!counterSnap.exists) {
+    existingOrders = await transaction.get(firestore.collection('pedidos'));
+  }
+  const sequence = nextOrderSequence(
+    counterSnap.exists ? counterSnap.data().lastNumber : 0,
+    existingOrders ? existingOrders.docs.map(doc => doc.data()) : []
+  );
+  transaction.set(counterRef, {
+    lastNumber: sequence,
+    updatedAt: FieldValue.serverTimestamp()
+  }, { merge: true });
+  return formatPublicOrderNumber(sequence);
+}
+
 app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
@@ -1593,8 +1616,11 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         }
         if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
       }
+      const displayOrderNumber = await allocatePublicOrderNumber(transaction);
       transaction.create(orderRef, {
         ...orderData,
+        displayOrderNumber,
+        publicOrderNumber: displayOrderNumber,
         uid: user.uid,
         userEmail: user.email,
         status: 'nuevo',
