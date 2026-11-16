@@ -1163,6 +1163,42 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
 });
 
 
+app.post('/api/courier/profile', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const ref = firestore.collection('repartidores').doc(courierId);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data().active === false
+      || String(snap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    if (!courierTermsAreCurrent(snap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para actualizar tu perfil.' });
+    const profile = normalizeCourier({
+      name: req.body?.name,
+      email: user.email,
+      phone: req.body?.phone,
+      whatsapp: req.body?.whatsapp
+    });
+    await ref.set({
+      name: profile.name,
+      phone: profile.phone,
+      whatsapp: profile.whatsapp,
+      profileUpdatedAt: FieldValue.serverTimestamp()
+    }, { merge: true });
+    return res.json({ success: true, profile: { name: profile.name, phone: profile.phone, whatsapp: profile.whatsapp } });
+  } catch (error) {
+    if (error.message === 'COURIER_NAME_INVALID') return res.status(400).json({ success: false, error: 'Ingresá tu nombre y apellido.' });
+    if (error.message === 'COURIER_PHONE_INVALID') return res.status(400).json({ success: false, error: 'Ingresá un teléfono válido.' });
+    if (error.message === 'COURIER_WHATSAPP_INVALID') return res.status(400).json({ success: false, error: 'Ingresá WhatsApp con código de país, sin + ni espacios.' });
+    if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'La cuenta no tiene un correo válido.' });
+    if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error guardando perfil personal del repartidor:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudieron guardar tus datos personales.' });
+  }
+});
+
 app.get('/api/courier/orders', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
@@ -1327,6 +1363,7 @@ app.post('/api/courier/route/optimize', async (req, res) => {
       || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
+    if (!courierTermsAreCurrent(courierSnap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para optimizar recorridos.' });
     const activeDocs = assignedSnapshot.docs.filter(doc =>
       ['assigned', 'en_camino'].includes(String(doc.data().delivery?.status || '')));
     if (!activeDocs.length) return res.json({ success: true, routeSegments: [], stopCount: 0 });
@@ -2226,6 +2263,7 @@ app.get('/api/courier/wallet', async (req, res) => {
       || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
+    if (!courierTermsAreCurrent(courierSnap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para consultar tu billetera.' });
     const [movementsSnap, payoutsSnap] = await Promise.all([
       firestore.collection('courier_wallet_movements').where('courierId', '==', courierId).get(),
       firestore.collection('courier_payouts').where('courierId', '==', courierId).get()
@@ -2254,6 +2292,7 @@ app.get('/api/courier/payment-profile', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
     const data = snap.data();
+    if (!courierTermsAreCurrent(data)) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para consultar tus datos de cobro.' });
     return res.json({ success: true, profile: {
       name: data.name || '',
       paymentAlias: data.paymentAlias || '',
@@ -2279,6 +2318,7 @@ app.post('/api/courier/payment-profile', async (req, res) => {
     if (!snap.exists || snap.data().active === false || String(snap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
+    if (!courierTermsAreCurrent(snap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para guardar tus datos de cobro.' });
     const paymentAlias = String(req.body?.paymentAlias || '').trim().slice(0, 80);
     const paymentCbuCvu = String(req.body?.paymentCbuCvu || '').replace(/\s+/g, '').slice(0, 30);
     const paymentHolder = String(req.body?.paymentHolder || '').trim().replace(/\s+/g, ' ').slice(0, 120);
