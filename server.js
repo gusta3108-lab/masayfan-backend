@@ -215,6 +215,24 @@ function validWebhookSignature(req) {
 async function registerApprovedPayment(paymentId, expectedReference, userUid, verifiedPayment = null, options = {}) {
   const paymentVerificationStartedAt = Date.now();
   const paymentMark = (phase, startedAt = paymentVerificationStartedAt) => console.info('[payment_processing_timing]', JSON.stringify({ phase, durationMs: Date.now() - startedAt, totalMs: Date.now() - paymentVerificationStartedAt }));
+
+  // El webhook puede registrar el pedido antes de que el cliente vuelva desde
+  // Mercado Pago. En ese caso, evitar una segunda consulta externa a MP:
+  // el pedido existente ya fue creado únicamente tras validar un pago aprobado.
+  if (userUid && !verifiedPayment) {
+    const existingOrderRef = firestore.collection('pedidos').doc(String(expectedReference));
+    const existingOrderSnap = await existingOrderRef.get();
+    if (existingOrderSnap.exists) {
+      const existingOrder = existingOrderSnap.data();
+      if (String(existingOrder.paymentId || '') === String(paymentId)
+        && String(existingOrder.uid || '') === String(userUid)
+        && existingOrder.paymentStatus === 'approved') {
+        paymentMark('already_registered_order_fast_path');
+        return { verified: true, alreadyRegistered: true };
+      }
+    }
+  }
+
   const paymentClient = new Payment(mpClient);
   const mercadoPagoLookupStartedAt = Date.now();
   const payment = verifiedPayment || await paymentClient.get({ id: String(paymentId) });
