@@ -35,6 +35,24 @@ test('summary separates cash, online, pending and gross sales; excludes test ord
   assert.equal(result.sales.deliveredOrdersToday, 1);
 });
 
+test('gross sales and collections exclude rejected, cancelled, refunded and charged-back orders', () => {
+  const result = summarizeAccounting({
+    now: new Date('2026-11-15T15:00:00.000Z'),
+    orders: [
+      { total: 1000, status: 'rechazado', paymentStatus: 'pending', paymentMethod: 'efectivo', createdAt: '2026-11-15T14:00:00.000Z' },
+      { total: 2000, status: 'cancelado', paymentStatus: 'pending', paymentMethod: 'efectivo', createdAt: '2026-11-15T14:00:00.000Z' },
+      { total: 3000, status: 'finalizado', paymentStatus: 'refunded', paymentMethod: 'mercadopago', createdAt: '2026-11-15T14:00:00.000Z' },
+      { total: 4000, status: 'finalizado', paymentStatus: 'charged_back', paymentMethod: 'mercadopago', createdAt: '2026-11-15T14:00:00.000Z' },
+      { total: 5000, status: 'nuevo', paymentStatus: 'pending', paymentMethod: 'efectivo', createdAt: '2026-11-15T14:00:00.000Z' },
+      { total: 6000, status: 'finalizado', paymentStatus: 'cash_received', paymentMethod: 'efectivo', createdAt: '2026-11-15T14:00:00.000Z' }
+    ]
+  });
+  assert.equal(result.sales.grossToday, 11000);
+  assert.equal(result.sales.ordersToday, 2);
+  assert.equal(result.sales.cashCollectedToday, 6000);
+  assert.equal(result.sales.pendingCollectionToday, 5000);
+});
+
 test('Mercado Pago fee and net totals use only values returned by the payment API', () => {
   const result = summarizeAccounting({
     now: new Date('2026-11-15T15:00:00.000Z'),
