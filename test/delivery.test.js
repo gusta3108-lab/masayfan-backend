@@ -58,6 +58,9 @@ test('courier order view includes the accepted fee and cash handoff state', () =
   assert.equal(result.delivery.storeAmount, 16000);
   assert.equal(result.delivery.storeCashStatus, 'received');
   assert.equal(result.delivery.offerAccepted, true);
+  assert.equal(result.pickupArrivedAt, false);
+  const arrived = buildCourierOrder('order-3', {}, { pickupArrivedAt: { seconds: 123 } });
+  assert.equal(arrived.pickupArrivedAt, true);
   const missing = buildCourierOrder('order-2', {}, {});
   assert.equal(missing.delivery.courierFee, null);
   assert.equal(missing.delivery.storeCashStatus, '');
@@ -100,8 +103,7 @@ test('courier order payload exposes only payment method and accepted delivery am
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
   });
   assert.deepEqual(Object.keys(payload).sort(), [
-    'address', 'clientName', 'courierId', 'courierName',
-    'delivery', 'deliveryLocation', 'displayOrderNumber', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
+    'address', 'clientName', 'courierId', 'courierName', 'delivery', 'deliveryLocation', 'displayOrderNumber', 'items', 'notes', 'orderId', 'paymentMethod', 'pickupArrivedAt', 'routeOrder', 'status'
   ].sort());
   assert.equal(Object.hasOwn(payload, 'clientPhone'), false, 'courier payload must not expose customer phone');
   assert.equal(payload.displayOrderNumber, 'ER-1');

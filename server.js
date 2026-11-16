@@ -1453,6 +1453,46 @@ app.post('/api/courier/route/optimize', async (req, res) => {
   }
 });
 
+app.post('/api/courier/orders/:orderId/arrival', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const user = await authenticatedUser(req);
+    const courierId = courierDocumentId(user.email);
+    const orderId = String(req.params.orderId || '');
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(orderId)) {
+      return res.status(400).json({ success: false, error: 'Pedido inválido.' });
+    }
+    const courierSnap = await firestore.collection('repartidores').doc(courierId).get();
+    if (!courierSnap.exists || courierSnap.data().active === false
+      || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    }
+    if (!courierTermsAreCurrent(courierSnap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para gestionar entregas.' });
+    const orderRef = firestore.collection('pedidos').doc(orderId);
+    await firestore.runTransaction(async transaction => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) throw new Error('ORDER_NOT_FOUND');
+      const order = orderSnap.data();
+      const delivery = order.delivery || {};
+      if (delivery.courierId !== courierId) throw new Error('COURIER_NOT_ASSIGNED');
+      if (String(order.status || '') !== 'listo' || String(delivery.status || '') !== 'assigned') {
+        throw new Error('PICKUP_NOT_AVAILABLE');
+      }
+      if (delivery.pickupArrivedAt) return;
+      transaction.update(orderRef, { 'delivery.pickupArrivedAt': FieldValue.serverTimestamp() });
+    });
+    return res.json({ success: true, orderId, pickupArrived: true });
+  } catch (error) {
+    if (error.message === 'ORDER_NOT_FOUND') return res.status(404).json({ success: false, error: 'El pedido no existe.' });
+    if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
+    if (error.message === 'PICKUP_NOT_AVAILABLE') return res.status(409).json({ success: false, error: 'El pedido ya no está disponible para confirmar la llegada al local.' });
+    if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
+    if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
+    console.error('Error confirmando llegada al local:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo confirmar la llegada al local.' });
+  }
+});
+
 app.post('/api/courier/orders/:orderId/status', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
@@ -1476,6 +1516,7 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
       const order = orderSnap.data();
       const delivery = order.delivery || {};
       if (delivery.courierId !== courierId) throw new Error('COURIER_NOT_ASSIGNED');
+      if (nextStatus === 'en_camino' && !delivery.pickupArrivedAt) throw new Error('PICKUP_ARRIVAL_REQUIRED');
       const fundConfigRef = firestore.collection('config').doc('fondo_asistencia');
       const fundMovementRef = firestore.collection('fondo_asistencia_movimientos').doc('contribution_' + orderId);
       const fundConfigSnap = nextStatus === 'delivered' ? await transaction.get(fundConfigRef) : null;
@@ -1536,6 +1577,7 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
     if (error.message === 'COURIER_NOT_ASSIGNED') return res.status(403).json({ success: false, error: 'Este pedido no está asignado a tu cuenta.' });
     if (error.message === 'INVALID_DELIVERY_TRANSITION') return res.status(409).json({ success: false, error: 'Primero marcá el pedido en camino y luego como entregado.' });
     if (error.message === 'ORDER_NOT_DELIVERABLE') return res.status(409).json({ success: false, error: 'Este pedido ya no está disponible para reparto. Consultá con administración.' });
+    if (error.message === 'PICKUP_ARRIVAL_REQUIRED') return res.status(409).json({ success: false, error: 'Primero confirmá que llegaste al local antes de confirmar la recogida.' });
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error actualizando entrega:', error.message);
