@@ -104,7 +104,7 @@ test('courier order payload exposes only payment method and accepted delivery am
     'delivery', 'deliveryLocation', 'displayOrderNumber', 'items', 'notes', 'orderId', 'paymentMethod', 'routeOrder', 'status'
   ].sort());
   assert.equal(Object.hasOwn(payload, 'clientPhone'), false, 'courier payload must not expose customer phone');
-  assert.equal(payload.displayOrderNumber, 'r-1');
+  assert.equal(payload.displayOrderNumber, 'ER-1');
   assert.equal(payload.paymentMethod, 'efectivo');
   assert.deepEqual(payload.delivery, {
     courierFee: 250, storeAmount: 749, storeCashStatus: 'received', offerAccepted: true
