@@ -1149,7 +1149,9 @@ app.get('/api/courier/orders', async (req, res) => {
       .sort((a, b) => Number(a.routeOrder || 9999) - Number(b.routeOrder || 9999));
     const completedCount = allAssignedOrders.filter(order => order.status === 'delivered').length;
     const routeSegments = buildGoogleMapsRouteSegments(orders);
-    return res.json({ success: true, courier: { name: courierSnap.data().name }, orders, completedCount, routeSegments });
+    // La dirección exacta del local se entrega solo a la sesión autenticada del repartidor.
+    const pickup = { address: 'Av. Pres. Raúl Alfonsín 630, B1824BJT Gerli, Lanús, Provincia de Buenos Aires, Argentina', location: null };
+    return res.json({ success: true, courier: { name: courierSnap.data().name }, pickup, orders, completedCount, routeSegments });
   } catch (error) {
     if (error.message === 'COURIER_EMAIL_INVALID') return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     if (error.message === 'AUTH_REQUIRED' || error.message === 'AUTH_EMAIL_REQUIRED') return res.status(401).json({ success: false, error: 'Iniciá sesión para consultar tus entregas.' });
