@@ -25,6 +25,7 @@ const { buildCourierOffer, acceptCourierOffer, buildCourierEarning, canConfirmCo
 const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessage } = require('./lib/order-chat');
 const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
 const { summarizeAccounting } = require('./lib/accounting-summary');
+const { buildBusinessContributionEntry } = require('./lib/courier-assistance-fund');
 
 const app = express();
 app.use(cors({
@@ -350,15 +351,34 @@ app.get('/api/admin/accounting-summary', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
     await authenticatedAdmin(req);
-    const [ordersSnapshot, fundSnapshot] = await Promise.all([
+    const [ordersSnapshot, fundSnapshot, fundConfigSnap] = await Promise.all([
       firestore.collection('pedidos').get(),
-      firestore.collection('fondo_asistencia_movimientos').get()
+      firestore.collection('fondo_asistencia_movimientos').get(),
+      firestore.collection('config').doc('fondo_asistencia').get()
     ]);
+    const fundMovements = fundSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+      .sort((a, b) => {
+        const toMillis = value => value?.toDate ? value.toDate().getTime() : new Date(value || 0).getTime();
+        return toMillis(b.createdAt || b.movementDate) - toMillis(a.createdAt || a.movementDate);
+      });
     const summary = summarizeAccounting({
       orders: ordersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
-      fundMovements: fundSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+      fundMovements
     });
-    return res.json({ success: true, summary });
+    const fundConfig = fundConfigSnap.exists
+      ? fundConfigSnap.data()
+      : { enabled: false, mode: 'fixed', fixedAmount: 0, percentage: 0 };
+    return res.json({
+      success: true,
+      summary,
+      fundConfig: {
+        enabled: fundConfig.enabled === true,
+        mode: fundConfig.mode === 'percentage' ? 'percentage' : 'fixed',
+        fixedAmount: Number(fundConfig.fixedAmount) || 0,
+        percentage: Number(fundConfig.percentage) || 0
+      },
+      fundMovements: fundMovements.slice(0, 30)
+    });
   } catch (error) {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
       || String(error.code || '').startsWith('auth/');
@@ -369,6 +389,108 @@ app.get('/api/admin/accounting-summary', async (req, res) => {
       error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
         : adminError ? 'No tenés permisos para consultar contabilidad.'
         : 'No se pudo consultar el resumen contable.'
+    });
+  }
+});
+
+
+app.post('/api/admin/assistance-fund/config', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const mode = String(req.body?.mode || 'fixed');
+    const enabled = req.body?.enabled === true;
+    const fixedAmount = Number(req.body?.fixedAmount);
+    const percentage = Number(req.body?.percentage);
+    if (!['fixed', 'percentage'].includes(mode)
+      || !Number.isFinite(fixedAmount) || fixedAmount < 0 || fixedAmount > 1000000000
+      || !Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
+      return res.status(400).json({ success: false, error: 'Configuración del fondo inválida.' });
+    }
+    if (enabled && (mode === 'fixed' ? fixedAmount <= 0 : percentage <= 0)) {
+      return res.status(400).json({ success: false, error: 'Para activar el fondo, configurá un aporte mayor que cero.' });
+    }
+    const config = {
+      enabled,
+      mode,
+      fixedAmount,
+      percentage,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedBy: String(admin.email).toLowerCase()
+    };
+    await firestore.collection('config').doc('fondo_asistencia').set(config, { merge: true });
+    return res.json({ success: true, config: { enabled, mode, fixedAmount, percentage } });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
+      || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para configurar el fondo.'
+        : 'No se pudo guardar la configuración del fondo.'
+    });
+  }
+});
+
+app.post('/api/admin/assistance-fund/movements', async (req, res) => {
+  try {
+    if (!requireFirebaseServices(res)) return;
+    const admin = await authenticatedAdmin(req);
+    const type = String(req.body?.type || '');
+    const amount = Number(req.body?.amount);
+    const movementDate = String(req.body?.movementDate || '');
+    const reference = String(req.body?.reference || '').trim().slice(0, 160);
+    const note = String(req.body?.note || '').trim().slice(0, 500);
+    const receiptReference = String(req.body?.receiptReference || '').trim().slice(0, 500);
+    const recipient = String(req.body?.recipient || '').trim().slice(0, 120);
+    const idempotencyKey = String(req.headers['idempotency-key'] || '');
+    const date = new Date(movementDate + 'T12:00:00-03:00');
+    if (!['bank_deposit', 'assistance'].includes(type)
+      || !Number.isFinite(amount) || amount <= 0 || amount > 1000000000
+      || !/^\d{4}-\d{2}-\d{2}$/.test(movementDate) || Number.isNaN(date.getTime())
+      || date.toISOString().slice(0, 10) !== movementDate
+      || !reference || reference.length < 3
+      || (type === 'assistance' && (!recipient || note.length < 5))
+      || !/^[A-Za-z0-9_-]{8,128}$/.test(idempotencyKey)) {
+      return res.status(400).json({ success: false, error: 'Revisá el tipo, importe, fecha y referencia. Para una asistencia también indicá destinatario y motivo.' });
+    }
+    const movementId = 'manual_' + crypto.createHash('sha256')
+      .update(String(admin.uid) + ':' + idempotencyKey).digest('hex');
+    const movementRef = firestore.collection('fondo_asistencia_movimientos').doc(movementId);
+    let alreadyRecorded = false;
+    await firestore.runTransaction(async transaction => {
+      const existing = await transaction.get(movementRef);
+      if (existing.exists) { alreadyRecorded = true; return; }
+      transaction.create(movementRef, {
+        type,
+        status: 'posted',
+        amount: Math.round((amount + Number.EPSILON) * 100) / 100,
+        currency: 'ARS',
+        movementDate: date.toISOString(),
+        reference,
+        note,
+        receiptReference,
+        ...(type === 'assistance' ? { recipient } : {}),
+        createdBy: String(admin.email).toLowerCase(),
+        createdAt: FieldValue.serverTimestamp()
+      });
+    });
+    return res.status(alreadyRecorded ? 200 : 201).json({
+      success: true,
+      alreadyRecorded,
+      message: alreadyRecorded ? 'Este movimiento ya estaba registrado.' : 'Movimiento registrado.'
+    });
+  } catch (error) {
+    const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
+      || String(error.code || '').startsWith('auth/');
+    const adminError = error.message === 'ADMIN_REQUIRED';
+    console.error('Error registrando movimiento del fondo:', error.message);
+    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+      success: false,
+      error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
+        : adminError ? 'No tenés permisos para registrar movimientos del fondo.'
+        : 'No se pudo registrar el movimiento.'
     });
   }
 });
@@ -1237,6 +1359,18 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
       const order = orderSnap.data();
       const delivery = order.delivery || {};
       if (delivery.courierId !== courierId) throw new Error('COURIER_NOT_ASSIGNED');
+      const fundConfigRef = firestore.collection('config').doc('fondo_asistencia');
+      const fundMovementRef = firestore.collection('fondo_asistencia_movimientos').doc('contribution_' + orderId);
+      const fundConfigSnap = nextStatus === 'delivered' ? await transaction.get(fundConfigRef) : null;
+      const fundMovementSnap = nextStatus === 'delivered' ? await transaction.get(fundMovementRef) : null;
+      const fundContribution = nextStatus === 'delivered'
+        ? buildBusinessContributionEntry({
+            orderId,
+            deliveryStatus: 'delivered',
+            courierFee: Number(delivery.courierFee || 0),
+            config: fundConfigSnap?.exists ? fundConfigSnap.data() : { enabled: false }
+          })
+        : null;
       if (!canCourierUpdateOrderStatus(String(order.status || ''), String(delivery.status || ''), nextStatus)) {
         throw new Error('ORDER_NOT_DELIVERABLE');
       }
@@ -1269,6 +1403,13 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
             createdAt: FieldValue.serverTimestamp()
           });
         }
+      }
+      if (fundContribution && !fundMovementSnap?.exists) {
+        transaction.create(fundMovementRef, {
+          ...fundContribution,
+          courierId,
+          createdAt: FieldValue.serverTimestamp()
+        });
       }
       transaction.update(orderRef, update);
     });
