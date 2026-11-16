@@ -1468,6 +1468,7 @@ app.post('/api/courier/orders/:orderId/status', async (req, res) => {
       || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
+    if (!courierTermsAreCurrent(courierSnap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para gestionar entregas.' });
     const orderRef = firestore.collection('pedidos').doc(orderId);
     await firestore.runTransaction(async transaction => {
       const orderSnap = await transaction.get(orderRef);
@@ -1557,6 +1558,7 @@ app.post('/api/courier/orders/:orderId/issue', async (req, res) => {
       || String(courierSnap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
+    if (!courierTermsAreCurrent(courierSnap.data())) return res.status(428).json({ success: false, code: 'COURIER_TERMS_REQUIRED', error: 'Aceptá los términos y la política de privacidad para gestionar entregas.' });
     const orderRef = firestore.collection('pedidos').doc(orderId);
     await firestore.runTransaction(async transaction => {
       const orderSnap = await transaction.get(orderRef);
