@@ -213,8 +213,12 @@ function validWebhookSignature(req) {
 }
 
 async function registerApprovedPayment(paymentId, expectedReference, userUid, verifiedPayment = null, options = {}) {
+  const paymentVerificationStartedAt = Date.now();
+  const paymentMark = (phase, startedAt = paymentVerificationStartedAt) => console.info('[payment_processing_timing]', JSON.stringify({ phase, durationMs: Date.now() - startedAt, totalMs: Date.now() - paymentVerificationStartedAt }));
   const paymentClient = new Payment(mpClient);
+  const mercadoPagoLookupStartedAt = Date.now();
   const payment = verifiedPayment || await paymentClient.get({ id: String(paymentId) });
+  paymentMark('mercadopago_payment_lookup', mercadoPagoLookupStartedAt);
   const reference = String(payment.external_reference || '');
   if (!reference || reference !== String(expectedReference || '')) {
     return { verified: false, reason: 'La referencia del pago no coincide.' };
@@ -222,7 +226,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
 
   const pendingRef = firestore.collection('pagos_pendientes').doc(reference);
   const orderRef = firestore.collection('pedidos').doc(reference);
+  const pendingLookupStartedAt = Date.now();
   const pendingSnap = await pendingRef.get();
+  paymentMark('firestore_pending_payment_lookup', pendingLookupStartedAt);
 
   const validationIncidentRef = firestore.collection('incidencias_pagos')
     .doc(reference + '_' + String(paymentId).replace(/[^A-Za-z0-9_-]/g, '_'));
@@ -315,6 +321,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   if (validationFailure) return recordApprovedPaymentValidationIncident(validationFailure, pending);
 
   let orderCreated = false;
+    const orderRegistrationStartedAt = Date.now();
     await firestore.runTransaction(async transaction => {
       orderCreated = false;
       const [freshPending, existingOrder, validationIncident] = await Promise.all([
@@ -348,7 +355,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       if (validationIncident.exists) transaction.delete(validationIncidentRef);
       orderCreated = true;
     });
+    paymentMark('firestore_order_registration', orderRegistrationStartedAt);
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
+    paymentMark('total_before_response');
     return { verified: true, alreadyRegistered: false };
 }
 
