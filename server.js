@@ -1,4 +1,6 @@
 const express = require('express');
+
+const { nextOrderSequence, formatPublicOrderNumber } = require('./lib/order-number');
 const crypto = require('node:crypto');
 const { canTransitionOrderStatus, canTransitionTestOrderStatus, canRejectOrder, isTestOrder } = require('./lib/order-status');
 const { requireCustomerAccount } = require('./lib/customer-account');
@@ -211,8 +213,12 @@ function validWebhookSignature(req) {
 }
 
 async function registerApprovedPayment(paymentId, expectedReference, userUid, verifiedPayment = null, options = {}) {
+  const paymentVerificationStartedAt = Date.now();
+  const paymentMark = (phase, startedAt = paymentVerificationStartedAt) => console.info('[payment_processing_timing]', JSON.stringify({ phase, durationMs: Date.now() - startedAt, totalMs: Date.now() - paymentVerificationStartedAt }));
   const paymentClient = new Payment(mpClient);
+  const mercadoPagoLookupStartedAt = Date.now();
   const payment = verifiedPayment || await paymentClient.get({ id: String(paymentId) });
+  paymentMark('mercadopago_payment_lookup', mercadoPagoLookupStartedAt);
   const reference = String(payment.external_reference || '');
   if (!reference || reference !== String(expectedReference || '')) {
     return { verified: false, reason: 'La referencia del pago no coincide.' };
@@ -220,7 +226,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
 
   const pendingRef = firestore.collection('pagos_pendientes').doc(reference);
   const orderRef = firestore.collection('pedidos').doc(reference);
+  const pendingLookupStartedAt = Date.now();
   const pendingSnap = await pendingRef.get();
+  paymentMark('firestore_pending_payment_lookup', pendingLookupStartedAt);
 
   const validationIncidentRef = firestore.collection('incidencias_pagos')
     .doc(reference + '_' + String(paymentId).replace(/[^A-Za-z0-9_-]/g, '_'));
@@ -313,6 +321,7 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
   if (validationFailure) return recordApprovedPaymentValidationIncident(validationFailure, pending);
 
   let orderCreated = false;
+    const orderRegistrationStartedAt = Date.now();
     await firestore.runTransaction(async transaction => {
       orderCreated = false;
       const [freshPending, existingOrder, validationIncident] = await Promise.all([
@@ -328,8 +337,11 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       }
       if (!freshPending.exists) throw new Error('El pedido pendiente ya no existe.');
       const data = freshPending.data();
+      const displayOrderNumber = await allocatePublicOrderNumber(transaction);
       transaction.set(orderRef, {
         ...data.order,
+        displayOrderNumber,
+        publicOrderNumber: displayOrderNumber,
         userEmail: data.userEmail,
         uid: data.uid,
         status: 'nuevo',
@@ -343,7 +355,9 @@ async function registerApprovedPayment(paymentId, expectedReference, userUid, ve
       if (validationIncident.exists) transaction.delete(validationIncidentRef);
       orderCreated = true;
     });
+    paymentMark('firestore_order_registration', orderRegistrationStartedAt);
     if (orderCreated) notifyAdminsNewOrder(reference, pending.order);
+    paymentMark('total_before_response');
     return { verified: true, alreadyRegistered: false };
 }
 
@@ -1542,6 +1556,24 @@ app.post('/api/admin/orders/:orderId/delete', async (req, res) => {
   }
 });
 
+async function allocatePublicOrderNumber(transaction) {
+  const counterRef = firestore.collection('contadores').doc('pedidos');
+  const counterSnap = await transaction.get(counterRef);
+  let existingOrders = null;
+  if (!counterSnap.exists) {
+    existingOrders = await transaction.get(firestore.collection('pedidos'));
+  }
+  const sequence = nextOrderSequence(
+    counterSnap.exists ? counterSnap.data().lastNumber : 0,
+    existingOrders ? existingOrders.docs.map(doc => doc.data()) : []
+  );
+  transaction.set(counterRef, {
+    lastNumber: sequence,
+    updatedAt: FieldValue.serverTimestamp()
+  }, { merge: true });
+  return formatPublicOrderNumber(sequence);
+}
+
 app.post('/api/pedidos/efectivo', async (req, res) => {
   try {
     if (!requireFirebaseServices(res)) return;
@@ -1593,8 +1625,11 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
         }
         if (previous.status === 'processing') throw new Error('IDEMPOTENCY_PROCESSING');
       }
+      const displayOrderNumber = await allocatePublicOrderNumber(transaction);
       transaction.create(orderRef, {
         ...orderData,
+        displayOrderNumber,
+        publicOrderNumber: displayOrderNumber,
         uid: user.uid,
         userEmail: user.email,
         status: 'nuevo',
@@ -1629,10 +1664,13 @@ app.post('/api/pedidos/efectivo', async (req, res) => {
 });
 
 app.post('/api/crear-preferencia', async (req, res) => {
+  const checkoutStartedAt = Date.now();
+  const checkoutMark = (phase, startedAt = checkoutStartedAt) => console.info('[checkout_timing]', JSON.stringify({ phase, durationMs: Date.now() - startedAt, totalMs: Date.now() - checkoutStartedAt }));
   try {
     if (!requireServices(res)) return;
     const user = await authenticatedUser(req);
     await requireCustomerAccount(user, firestore);
+    checkoutMark('authentication');
     const storeSnap = await firestore.collection('config').doc('local').get();
     if (storeSnap.exists && storeSnap.data().abierto === false) {
       return res.status(409).json({ success: false, error: 'El local está cerrado y no recibe pedidos.' });
@@ -1656,7 +1694,9 @@ app.post('/api/crear-preferencia', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Completá nombre, teléfono y dirección.' });
     }
 
+    const pricingStartedAt = Date.now();
     const pricedItems = await priceCartItems(items);
+    checkoutMark('cart_pricing', pricingStartedAt);
     const total = money(pricedItems.reduce((sum, item) => sum + item.price * item.qty, 0));
     const orderData = { clientName, clientPhone, address, notes, ...(deliveryLocation ? { deliveryLocation } : {}), items: pricedItems, total };
     const idempotency = checkoutIdempotency(req, user, pricedItems, orderData, 'mercadopago');
@@ -1671,6 +1711,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
 
     // La clave y la reserva se registran en una sola transacción. Los reintentos
     // concurrentes no pueden reservar unidades ni crear preferencias duplicadas.
+    const reservationStartedAt = Date.now();
     await firestore.runTransaction(async transaction => {
       needsAdminReview = false;
       const idempotencySnap = await transaction.get(idempotency.ref);
@@ -1747,6 +1788,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
       });
     });
 
+    checkoutMark('firestore_reservation_and_idempotency', reservationStartedAt);
+
     if (needsAdminReview) {
       return res.status(409).json({ success: false, code: 'CHECKOUT_NEEDS_REVIEW', error: 'Este intento de pago requiere revisión administrativa. No vuelvas a pagar ni generes otro intento hasta que lo revisemos.' });
     }
@@ -1761,6 +1804,7 @@ app.post('/api/crear-preferencia', async (req, res) => {
     }
 
     try {
+      const mercadoPagoStartedAt = Date.now();
       const result = await preference.create({
         body: {
           items: pricedItems.map(item => ({
@@ -1786,6 +1830,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
         }
       });
 
+      checkoutMark('mercadopago_preference_api', mercadoPagoStartedAt);
+      const persistenceStartedAt = Date.now();
       // El enlace solo se entrega después de persistir el ID de preferencia.
       await pendingRef.update({
         preferenceId: String(result.id),
@@ -1798,6 +1844,8 @@ app.post('/api/crear-preferencia', async (req, res) => {
         preferenceId: String(result.id),
         completedAt: FieldValue.serverTimestamp()
       });
+      checkoutMark('firestore_preference_persistence', persistenceStartedAt);
+      checkoutMark('total_before_response');
       return res.json({ success: true, init_point: result.init_point, external_reference: externalReference, reservation_expires_at: reservationEnd.toISOString(), replayed: false });
     } catch (preferenceError) {
       // Un timeout o error de red no demuestra que Mercado Pago no haya creado
