@@ -449,6 +449,7 @@ app.post('/api/admin/assistance-fund/movements', async (req, res) => {
     if (!['bank_deposit', 'assistance'].includes(type)
       || !Number.isFinite(amount) || amount <= 0 || amount > 1000000000
       || !/^\d{4}-\d{2}-\d{2}$/.test(movementDate) || Number.isNaN(date.getTime())
+      || date.toISOString().slice(0, 10) !== movementDate
       || !reference || reference.length < 3
       || (type === 'assistance' && (!recipient || note.length < 5))
       || !/^[A-Za-z0-9_-]{8,128}$/.test(idempotencyKey)) {
