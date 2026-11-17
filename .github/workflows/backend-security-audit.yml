@@ -18,11 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout proposed branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24.14.1
+          package-manager-cache: false
       - name: Record npm version
         run: npm --version
       - name: Install dependencies without running package scripts
@@ -33,7 +34,7 @@ jobs:
           node -e "const r=require('./npm-audit.json'); console.log(JSON.stringify({metadata:r.metadata, vulnerabilities:r.vulnerabilities}, null, 2)); if (!r.metadata) process.exit(2); if ((r.metadata.vulnerabilities?.critical || 0) + (r.metadata.vulnerabilities?.high || 0) + (r.metadata.vulnerabilities?.moderate || 0) > 0) process.exitCode=1"
       - name: Preserve proposed audit report and resolved lockfile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: proposed-branch-security-audit
           path: |
@@ -47,13 +48,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Render production branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24.14.1
+          package-manager-cache: false
       - name: Record npm version
         run: npm --version
       - name: Install dependencies exactly as Render does
@@ -64,7 +66,7 @@ jobs:
           node -e "const r=require('./npm-audit-main.json'); console.log(JSON.stringify({metadata:r.metadata, vulnerabilities:r.vulnerabilities}, null, 2)); if (!r.metadata) process.exit(2); if ((r.metadata.vulnerabilities?.critical || 0) + (r.metadata.vulnerabilities?.high || 0) + (r.metadata.vulnerabilities?.moderate || 0) > 0) process.exitCode=1"
       - name: Preserve production-main audit report and resolved lockfile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: render-main-security-audit
           path: |
