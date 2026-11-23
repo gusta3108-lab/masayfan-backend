@@ -28,6 +28,7 @@ const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessag
 const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
 const { summarizeAccounting } = require('./lib/accounting-summary');
 const { buildBusinessContributionEntry } = require('./lib/courier-assistance-fund');
+const { hasRequiredMovementEvidence } = require('./lib/fund-movement-evidence');
 
 const app = express();
 app.use(cors({
@@ -483,9 +484,10 @@ app.post('/api/admin/assistance-fund/movements', async (req, res) => {
       || !/^\d{4}-\d{2}-\d{2}$/.test(movementDate) || Number.isNaN(date.getTime())
       || date.toISOString().slice(0, 10) !== movementDate
       || !reference || reference.length < 3
+      || !hasRequiredMovementEvidence(type, receiptReference)
       || (type === 'assistance' && (!recipient || note.length < 5))
       || !/^[A-Za-z0-9_-]{8,128}$/.test(idempotencyKey)) {
-      return res.status(400).json({ success: false, error: 'Revisá el tipo, importe, fecha y referencia. Para una asistencia también indicá destinatario y motivo.' });
+      return res.status(400).json({ success: false, error: 'Revisá el tipo, importe, fecha y referencia. Adjuntá también el identificador o enlace del comprobante; para una asistencia indicá destinatario y motivo.' });
     }
     const movementId = 'manual_' + crypto.createHash('sha256')
       .update(String(admin.uid) + ':' + idempotencyKey).digest('hex');
