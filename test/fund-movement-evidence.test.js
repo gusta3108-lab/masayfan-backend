@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { hasRequiredMovementEvidence } = require('../lib/fund-movement-evidence');
+const { hasRequiredMovementEvidence, isAssistanceFundEnabled } = require('../lib/fund-movement-evidence');
 
 test('bank deposits cannot be posted without a receipt reference', () => {
   assert.equal(hasRequiredMovementEvidence('bank_deposit', ''), false);
@@ -20,4 +20,13 @@ test('assistance payments also require supporting evidence', () => {
 test('unsupported movement types are never accepted as evidenced movements', () => {
   assert.equal(hasRequiredMovementEvidence('contribution', 'REC-123'), false);
   assert.equal(hasRequiredMovementEvidence('', 'REC-123'), false);
+});
+
+
+test('manual fund movements remain blocked unless the fund is explicitly enabled', () => {
+  assert.equal(isAssistanceFundEnabled(null), false);
+  assert.equal(isAssistanceFundEnabled({}), false);
+  assert.equal(isAssistanceFundEnabled({ enabled: false }), false);
+  assert.equal(isAssistanceFundEnabled({ enabled: 'true' }), false);
+  assert.equal(isAssistanceFundEnabled({ enabled: true }), true);
 });
