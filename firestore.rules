@@ -76,8 +76,9 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['correo', 'createdAt', 'termsAccepted', 'termsVersion', 'termsAcceptedAt', 'privacyVersion'])
         && request.resource.data.correo == request.auth.token.email
         && request.resource.data.termsAccepted == true
-        && request.resource.data.termsVersion == '1.0'
-        && request.resource.data.privacyVersion == '1.0'
+        // Keep legacy cached clients working while accepting the current v2 consent.
+        && request.resource.data.termsVersion in ['1.0', '2.0']
+        && request.resource.data.privacyVersion in ['1.0', '2.0']
         && request.resource.data.termsAcceptedAt is timestamp
         && request.resource.data.createdAt is timestamp;
       allow update, delete: if false;
