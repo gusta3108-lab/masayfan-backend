@@ -28,6 +28,7 @@ const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessag
 const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
 const { summarizeAccounting } = require('./lib/accounting-summary');
 const { buildBusinessContributionEntry } = require('./lib/courier-assistance-fund');
+const { hasRequiredMovementEvidence, isAssistanceFundEnabled } = require('./lib/fund-movement-evidence');
 
 const app = express();
 app.use(cors({
@@ -483,17 +484,25 @@ app.post('/api/admin/assistance-fund/movements', async (req, res) => {
       || !/^\d{4}-\d{2}-\d{2}$/.test(movementDate) || Number.isNaN(date.getTime())
       || date.toISOString().slice(0, 10) !== movementDate
       || !reference || reference.length < 3
+      || !hasRequiredMovementEvidence(type, receiptReference)
       || (type === 'assistance' && (!recipient || note.length < 5))
       || !/^[A-Za-z0-9_-]{8,128}$/.test(idempotencyKey)) {
-      return res.status(400).json({ success: false, error: 'Revisá el tipo, importe, fecha y referencia. Para una asistencia también indicá destinatario y motivo.' });
+      return res.status(400).json({ success: false, error: 'Revisá el tipo, importe, fecha y referencia. Adjuntá también el identificador o enlace del comprobante; para una asistencia indicá destinatario y motivo.' });
     }
     const movementId = 'manual_' + crypto.createHash('sha256')
       .update(String(admin.uid) + ':' + idempotencyKey).digest('hex');
     const movementRef = firestore.collection('fondo_asistencia_movimientos').doc(movementId);
+    const fundConfigRef = firestore.collection('config').doc('fondo_asistencia');
     let alreadyRecorded = false;
     await firestore.runTransaction(async transaction => {
-      const existing = await transaction.get(movementRef);
+      const [configSnap, existing] = await Promise.all([
+        transaction.get(fundConfigRef),
+        transaction.get(movementRef)
+      ]);
       if (existing.exists) { alreadyRecorded = true; return; }
+      if (!isAssistanceFundEnabled(configSnap.exists ? configSnap.data() : null)) {
+        throw new Error('ASSISTANCE_FUND_DISABLED');
+      }
       transaction.create(movementRef, {
         type,
         status: 'posted',
@@ -517,11 +526,13 @@ app.post('/api/admin/assistance-fund/movements', async (req, res) => {
     const authError = ['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)
       || String(error.code || '').startsWith('auth/');
     const adminError = error.message === 'ADMIN_REQUIRED';
+    const fundDisabled = error.message === 'ASSISTANCE_FUND_DISABLED';
     console.error('Error registrando movimiento del fondo:', error.message);
-    return res.status(authError ? 401 : adminError ? 403 : 500).json({
+    return res.status(authError ? 401 : adminError ? 403 : fundDisabled ? 409 : 500).json({
       success: false,
       error: authError ? 'La sesión expiró. Volvé a iniciar sesión.'
         : adminError ? 'No tenés permisos para registrar movimientos del fondo.'
+        : fundDisabled ? 'El fondo de asistencia está desactivado. No se pueden registrar movimientos.'
         : 'No se pudo registrar el movimiento.'
     });
   }
