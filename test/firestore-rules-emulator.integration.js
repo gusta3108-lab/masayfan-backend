@@ -118,6 +118,22 @@ test('Firestore security rules enforce public, owner, and server-only access', a
         correo: { stringValue: owner.email },
         createdAt: { timestampValue: new Date().toISOString() },
         termsAccepted: { booleanValue: true },
+        termsVersion: { stringValue: '2.0' },
+        termsAcceptedAt: { timestampValue: new Date().toISOString() },
+        privacyVersion: { stringValue: '2.0' }
+      } }
+    });
+    assert.equal(response.status, 200, await response.text());
+  });
+
+  await t.test('se mantiene compatibilidad con aceptaciones heredadas 1.0', async () => {
+    const response = await request(`clientes/${other.localId}`, {
+      token: other.idToken,
+      method: 'PATCH',
+      body: { fields: {
+        correo: { stringValue: other.email },
+        createdAt: { timestampValue: new Date().toISOString() },
+        termsAccepted: { booleanValue: true },
         termsVersion: { stringValue: '1.0' },
         termsAcceptedAt: { timestampValue: new Date().toISOString() },
         privacyVersion: { stringValue: '1.0' }
