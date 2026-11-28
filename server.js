@@ -28,6 +28,7 @@ const { resolveOrderChatParticipant, isOrderChatClosed, normalizeOrderChatMessag
 const { buildMercadoPagoAccounting, hasInstallmentPolicyViolation } = require('./lib/mercadopago-payment-accounting');
 const { summarizeAccounting } = require('./lib/accounting-summary');
 const { buildBusinessContributionEntry } = require('./lib/courier-assistance-fund');
+const { CURRENT_TERMS_VERSION, CURRENT_PRIVACY_VERSION, isCurrentCourierConsent, isCurrentConsentSubmission } = require('./lib/legal-consent');
 const { hasRequiredMovementEvidence, isAssistanceFundEnabled } = require('./lib/fund-movement-evidence');
 
 const app = express();
@@ -1175,9 +1176,7 @@ app.post('/api/admin/assign-courier-batch', async (req, res) => {
 
 
 function courierTermsAreCurrent(courier) {
-  return courier?.termsAccepted === true
-    && String(courier?.termsVersion || '') === '1.0'
-    && String(courier?.privacyVersion || '') === '1.0';
+  return isCurrentCourierConsent(courier);
 }
 
 app.post('/api/courier/terms', async (req, res) => {
@@ -1191,18 +1190,17 @@ app.post('/api/courier/terms', async (req, res) => {
       || String(snap.data().email || '').toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Esta cuenta no está habilitada como repartidor.' });
     }
-    if (req.body?.termsAccepted !== true || req.body?.termsVersion !== '1.0'
-      || req.body?.privacyVersion !== '1.0') {
+    if (!isCurrentConsentSubmission(req.body)) {
       return res.status(400).json({ success: false, error: 'Debés aceptar expresamente los términos y la política de privacidad vigentes.' });
     }
     await ref.set({
       termsAccepted: true,
-      termsVersion: '1.0',
+      termsVersion: CURRENT_TERMS_VERSION,
       termsAcceptedAt: FieldValue.serverTimestamp(),
-      privacyVersion: '1.0',
+      privacyVersion: CURRENT_PRIVACY_VERSION,
       privacyAcceptedAt: FieldValue.serverTimestamp()
     }, { merge: true });
-    return res.json({ success: true, termsVersion: '1.0' });
+    return res.json({ success: true, termsVersion: CURRENT_TERMS_VERSION, privacyVersion: CURRENT_PRIVACY_VERSION });
   } catch (error) {
     if (['AUTH_REQUIRED', 'AUTH_EMAIL_REQUIRED'].includes(error.message)) return res.status(401).json({ success: false, error: 'La sesión expiró. Volvé a iniciar sesión.' });
     console.error('Error registrando aceptación de términos del repartidor:', error.message);
@@ -1260,7 +1258,7 @@ app.get('/api/courier/orders', async (req, res) => {
       return res.json({
         success: true,
         termsRequired: true,
-        termsVersion: '1.0',
+        termsVersion: CURRENT_TERMS_VERSION,
         courier: { name: courierSnap.data().name || '' },
         pickup: null, orders: [], completedCount: 0, routeSegments: []
       });
